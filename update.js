@@ -2,7 +2,7 @@ import { execSync } from "child_process";
 import pathModule from "path";
 
 // Specified path for update
-const path = "/root/ivac_project";
+const path = "/root/sniper";
 
 console.log("------- [ SYSTEM UPDATE START ]  -------");
 
