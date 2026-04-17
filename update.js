@@ -12,18 +12,19 @@ console.log("------- [ SYSTEM UPDATE START ]  -------");
 
 try {
     const absolutePath = pathModule.isAbsolute(path) ? path : pathModule.resolve(path);
-    //console.log(`> Updating Path: ${absolutePath}`);
     const output = execSync("git pull origin main", { 
         cwd: absolutePath, 
         encoding: "utf8",
         stdio: "pipe" 
     });
     
-    console.log(`✅ Result: ${output.trim()}`);
+    if (output.includes("Already up to date")) {
+        console.log("✅ Result: Already up to date.");
+    } else {
+        console.log("✅ Result: New system updated Successfully");
+    }
 } catch (error) {
-    console.error(`❌ Update Error at : ${error.message}`);
-    if (error.stdout) console.log(`Output: ${error.stdout}`);
-    if (error.stderr) console.error(`Stderr: ${error.stderr}`);
+    console.log("❌ Result: Failed to update the system");
 }
 
 console.log("------- [ RESTARTING ENGINE ] -------");
