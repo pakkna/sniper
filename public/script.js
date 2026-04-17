@@ -17,7 +17,7 @@ function logSolver(msg, color = "#10b981", json = null) {
     
     const div = document.createElement("div");
     div.style.color = color;
-    div.style.margin = "3px 0";
+    div.style.margin = "0";
     div.style.display = "flex";
     div.style.alignItems = "center";
     div.style.gap = "6px";
@@ -346,7 +346,7 @@ socket.on("show-reservation-success-popup", (data) => {
     m.appendChild(c);
     document.body.appendChild(m);
 
-    let timeLeft = 30; // 30 seconds
+    let timeLeft = 20; // 20 seconds
     let countdownInterval;
 
     const renderTime = () => {
@@ -517,6 +517,7 @@ if (retryLogic) {
     };
     const savedLogic = localStorage.getItem("ivac_retry_logic");
     if (savedLogic) retryLogic.value = savedLogic;
+    else retryLogic.value = "onFail";
 }
 
 const togglePass = $("togglePassword");
@@ -592,7 +593,9 @@ if (btnPay) {
     btnPay.onclick = () => {
         btnPay.innerHTML = "<span class='spin'>⏳</span> Loading...";
         updateStep("payNow", "active");
-        socket.emit("pay-now", { retrySettings: getRetrySettings() });
+        let rSet = getRetrySettings();
+        rSet.logic = "batch";
+        socket.emit("pay-now", { retrySettings: rSet });
     };
 }
 
