@@ -1,8 +1,12 @@
 import { execSync } from "child_process";
 import pathModule from "path";
+import { fileURLToPath } from "url";
 
-// Specified path for update
-const path = "/root/sniper";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = pathModule.dirname(__filename);
+
+// Specified path for update dynamically resolves to the project's folder
+const path = __dirname;
 
 console.log("------- [ SYSTEM UPDATE START ]  -------");
 
