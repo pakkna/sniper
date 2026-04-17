@@ -1,6 +1,6 @@
 import express from "express";
 import fs from "fs";
-import { exec } from "child_process";
+import { exec, spawn } from "child_process";
 import { gotScraping } from "got-scraping";
 import { createServer } from "http";
 import path from "path";
@@ -1417,19 +1417,26 @@ io.on("connection", (socket) => {
     socket.on("git-update", () => {
         logSolver("🚀 Initiating System Update via script...", "#3b82f6");
         
-        exec("node update.js", (error, stdout, stderr) => {
-            if (stdout) {
-                // Parse lines to log them cleanly
-                stdout.split("\n").forEach(line => {
-                    if (line.trim()) logSolver(line, "#10b981");
-                });
+        const updateProcess = spawn("node", ["update.js"]);
+
+        updateProcess.stdout.on("data", (data) => {
+            data.toString().split("\n").forEach(line => {
+                if (line.trim()) logSolver(line, "#10b981");
+            });
+        });
+
+        updateProcess.stderr.on("data", (data) => {
+            data.toString().split("\n").forEach(line => {
+                if (line.trim()) logSolver(line, "#ef4444");
+            });
+        });
+
+        updateProcess.on("close", (code) => {
+            if (code !== 0) {
+                logSolver(`❌ Update Process exited with code ${code}`, "#ef4444");
+            } else {
+                logSolver("✅ System Update Cycle Completed.", "#10b981");
             }
-            if (error) {
-                logSolver(`❌ Update Process Error: ${error.message}`, "#ef4444");
-                if (stderr) logSolver(`Stderr: ${stderr}`, "#ef4444");
-                return;
-            }
-            logSolver("✅ System Update Cycle Completed.", "#10b981");
         });
     });
     
