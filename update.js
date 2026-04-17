@@ -29,9 +29,9 @@ try {
 
 console.log("------- [ RESTARTING ENGINE ] -------");
 try {
+    console.log("🚀 Server Restart successfully!");
     // Restarting all PM2 processes to ensure everything is fresh
     execSync("pm2 restart all", { stdio: "ignore" });
-    console.log("🚀 Server Restart successfully!");
 } catch (error) {
     console.error("❌ PM2 Restart failed. Check your process manager.");
 }
