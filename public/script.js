@@ -18,6 +18,8 @@ function logSolver(msg, color = "#10b981", json = null) {
     const div = document.createElement("div");
     div.style.color = color;
     div.style.margin = "0";
+    div.style.padding = "0";
+    div.style.lineHeight = "1.15";
     div.style.display = "flex";
     div.style.alignItems = "center";
     div.style.gap = "6px";

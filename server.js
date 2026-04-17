@@ -512,7 +512,7 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__) {
             return;
         }
 
-        const wTag = `[W-${workerId} | ${getNetworkTitle(workerId)}]`;
+        const wTag = `[W-${workerId}|${getNetworkTitle(workerId)}]`;
         logSolver(`${wTag} ReserveOTP Started`, "#3b82f6");
         try {
             const res = await getGotClient(`ReserveOTP-W${workerId}`, workerId).post(`${RootUrl}/iams/api/v1/forgot-password/sendOtp`, {
@@ -522,7 +522,7 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__) {
 
             const data = res.body;
 
-            const wTag = `[W-${workerId} | ${getNetworkTitle(workerId)}]`;
+            const wTag = `[W-${workerId}|${getNetworkTitle(workerId)}]`;
 
             if (res.statusCode === 200 && data?.successFlag) {
                 TaskManager.stopTask(taskName);
@@ -604,7 +604,7 @@ async function sendOtp(mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue) {
 
     const trySend = async (workerId, oldTokenToUse = null) => {
         if (controller.signal.aborted) return;
-        const wTag = `[W-${workerId} | ${getNetworkTitle(workerId)}]`;
+        const wTag = `[W-${workerId}|${getNetworkTitle(workerId)}]`;
         logSolver(`${wTag} SendOTP Started`, "#3b82f6");
         try {
             const now = Date.now();
@@ -630,7 +630,7 @@ async function sendOtp(mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue) {
 
             const data = response.body;
 
-            const wTag = `[W-${workerId} | ${getNetworkTitle(workerId)}]`;
+            const wTag = `[W-${workerId}|${getNetworkTitle(workerId)}]`;
 
             if (response.statusCode === 200 && data?.successFlag) {
                 TaskManager.stopTask(taskName);
@@ -786,7 +786,7 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
         if (delay) await new Promise(r => TaskManager.setTimeout("verifyOtp", r, delay));
         if (successTriggered || controller.signal.aborted) return;
 
-        const wTag = `[W-${id} | ${getNetworkTitle(id)}]`;
+        const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
         logSolver(`${wTag} VerifyOTP Started`, "#3b82f6");
         
         const onFail = (waitMs) => {
@@ -989,7 +989,7 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
         if (delay) await new Promise(r => TaskManager.setTimeout("reserveSlot", r, delay));
         if (successTriggered || controller.signal.aborted) return;
 
-        const wTag = `[W-${id} | ${getNetworkTitle(id)}]`;
+        const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
         logSolver(`${wTag} ReserveSlot Started`, "#3b82f6");
 
         const onFail = (waitMs) => {
@@ -1161,7 +1161,7 @@ async function payNow(__IVAC_RETRY__, isBatch = false) {
         if (delay) await new Promise(r => TaskManager.setTimeout("payNow", r, delay));
         if (successTriggered || controller.signal.aborted) return;
 
-        const wTag = `[W-${id} | ${getNetworkTitle(id)}]`;
+        const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
         logSolver(`${wTag} PayNow Hit Started...`, "#3b82f6");
 
         const onFail = (waitMs) => {
