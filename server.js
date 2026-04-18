@@ -129,7 +129,13 @@ const tlsSessionCache = new Map();
 function getGotClient(taskName, workerId) {
     const proxyUrl = getProxyUrl(taskName, workerId, true);
     const netOpts = getNetworkOpts(workerId);
-    const key = `${currentProxyState?.activeMode || 'native'}-${workerId}-${proxyUrl || 'none'}`;
+    
+    // By grouping caching by localAddress and proxyUrl instead of workerId, 
+    // workers sharing the same network interface/proxy will share the same Got instance 
+    // and multiplex over the same HTTP/2 connection.
+    const localIp = netOpts.localAddress || 'auto';
+    const key = `${currentProxyState?.activeMode || 'native'}-${localIp}-${proxyUrl || 'none'}`;
+    
     if (!workerNetworkClients.has(key)) {
         const client = gotScraping.extend({
             http2: true,
