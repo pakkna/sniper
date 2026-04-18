@@ -1,12 +1,12 @@
+import { spawn } from "child_process";
 import express from "express";
 import fs from "fs";
-import { exec, spawn } from "child_process";
 import { gotScraping } from "got-scraping";
 import { createServer } from "http";
-import { encryptCaptchaToken } from "./tokenEncrypt.js";
 import path from "path";
 import { Server } from "socket.io";
 import { fileURLToPath } from "url";
+import { encryptCaptchaToken } from "./tokenEncrypt.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -133,6 +133,7 @@ function getGotClient(taskName, workerId) {
     if (!workerNetworkClients.has(key)) {
         const client = gotScraping.extend({
             http2: true,
+            dnsCache: true,
             throwHttpErrors: false,
             retry: { limit: 0 },
             timeout: { request: 120000 },
@@ -572,6 +573,65 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__) {
     trySend();
 }
 
+async function sendOTPWarmUp(mobile, mbpassword, workers) {
+    const taskName = `sendOTPWarmUp`;
+    const controller = TaskManager.start(taskName);
+
+    if (!mobile || !mbpassword) {
+        TaskManager.stopTask(taskName);
+        return logSolver(`Phone & Password required`, "#d55252");
+    }
+
+    const trySend = async (workerId) => {
+        if (controller.signal.aborted) return;
+        const wTag = `[W-${workerId}|${getNetworkTitle(workerId)}]`;
+        logSolver(`${wTag} SendOTP WarmUp Started`, "#3b82f6");
+        try {
+            const now = Date.now();
+            const expired = (now - captchaCreatedAt) > CAPTCHA_TTL;
+
+            let tokenToUse;
+            if (!captchaToken || expired) {
+                captchaToken = await solveAggressive();
+                captchaCreatedAt = Date.now();
+                tokenToUse = captchaToken;
+            } else {
+                tokenToUse = captchaToken;
+            }
+
+            const payload = { captchaToken: tokenToUse, phone: mobile, password: mbpassword };
+
+            const response = await getGotClient(`WarmUp-W${workerId}`, workerId).post(`${RootUrl}/iams/api/v1/auth/signin`, {
+                json: payload, responseType: "json", signal: controller.signal,
+                headers: { "accept": "application/json, text/plain, */*", "cache-control": "no-cache, no-store, must-revalidate" },
+                throwHttpErrors: false
+            });
+
+            const data = response.body;
+
+            if (response.statusCode === 200 && data?.successFlag) {
+                logSolver(`${wTag} WarmUp Request Successfully`, '#16a34a', data);
+            } else {
+                if (response.statusCode === 403) {
+                    logSolver(`${wTag} Send OTP WarmUp Status [403]`, '#d55252');
+                } else {
+                    logSolver(`${wTag} Send OTP WarmUp Status [${response.statusCode}]`, '#d55252', data);
+                }
+            }
+            TaskManager.removeController(taskName, controller);
+        } catch (err) {
+            if (err.name !== "AbortError") {
+                logSolver(`${wTag} Send OTP WarmUp Cross Error`, '#d55252');
+            }
+            TaskManager.removeController(taskName, controller);
+        }
+    };
+
+    for (let i = 1; i <= workers; i++) {
+        trySend(i);
+    }
+}
+
 async function sendOtp(mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue) {
     finishBtn("sendOtp", "Sending...");
     showStatus("Sending OTP...", "info");
@@ -697,9 +757,11 @@ async function sendOtp(mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue) {
                 
                 let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
                 if (response.statusCode === 403 || response.statusCode === 503) {
-                    waitMs = 2500 + Math.floor(Math.random() * 501); // 2.5s–3s
+                    waitMs = 2500 + Math.floor(Math.random() * 501);
+                } else if (response.statusCode === 429) {
+                    waitMs = 20000; // 20s
                 } else if ([500, 501, 502, 504, 520].includes(response.statusCode)) {
-                    waitMs = 500 + Math.floor(Math.random() * 1000); // 1s–1.5s
+                    waitMs = 800 + Math.floor(Math.random() * 401);
                 } else if ([400, 401].includes(response.statusCode)) {
                     waitMs = 1000;
                 }
@@ -839,8 +901,13 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
                 let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
                 if (res.statusCode === 403 || res.statusCode === 503) {
                     waitMs = 2500 + Math.floor(Math.random() * 501); // 2.5s–3s
-                }else if ([500, 501, 502, 504, 520].includes(res.statusCode))      waitMs = 200 + Math.floor(Math.random() * 300); // 200ms-500ms
-                else if ([400, 401].includes(res.statusCode)) waitMs = 1000;
+                } else if (res.statusCode === 429) {
+                    waitMs = 20000; // 20s
+                } else if ([500, 501, 502, 504, 520].includes(res.statusCode)) {
+                    waitMs = 800 + Math.floor(Math.random() * 401); // 800ms-1200ms
+                } else if ([400, 401].includes(res.statusCode)) {
+                    waitMs = 1000;
+                }
                 
                 logSolver(`OTP Verify Status [${res.statusCode}] -> Retry in ${waitMs}ms`, '#d55252', data);
                 TaskManager.removeController("verifyOtp", controller);
@@ -1078,7 +1145,8 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                  
                  let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
                  if (res.statusCode === 403 || res.statusCode === 503) waitMs = 2500 + Math.floor(Math.random() * 501); // 2.5s-3s
-                 else if ([500, 501, 502, 504, 520, 401].includes(res.statusCode)) waitMs = 200 + Math.floor(Math.random() * 300); // 200ms-500ms
+                 else if (res.statusCode === 429) waitMs = 20000; // 20s
+                 else if ([500, 501, 502, 504, 520, 401].includes(res.statusCode)) waitMs = 800 + Math.floor(Math.random() * 401); // 800ms-1200ms
                  else if ([400].includes(res.statusCode)) waitMs = 1000;
 
                  if (res.statusCode === 403) {
@@ -1221,7 +1289,8 @@ async function payNow(__IVAC_RETRY__, isBatch = false) {
             if (__IVAC_RETRY__?.enabled) {
                 let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
                 if ([403, 503].includes(res.statusCode)) waitMs = 2500 + Math.floor(Math.random() * 501);
-                else if ([502, 504, 520].includes(res.statusCode)) waitMs = 500 + Math.floor(Math.random() * 501);
+                else if (res.statusCode === 429) waitMs = 20000; // 20s
+                else if ([502, 504, 520].includes(res.statusCode)) waitMs = 800 + Math.floor(Math.random() * 401); // 800ms-1200ms
 
                 logSolver(`${wTag} Payment retry [${res.statusCode}] in ${waitMs}ms`, '#d55252', data);
                 TaskManager.removeController("payNow", controller);
@@ -1289,11 +1358,17 @@ io.on("connection", (socket) => {
 
     socket.on("get-otp", (data) => { pollOtpLoop(data.mobile, data.retrySettings, true); });
     socket.on("reserve-otp", (data) => { reserveOtp(data.email,data.mobile, data.retrySettings); });
-    socket.on("warm-up-workers", async () => {
+    socket.on("warm-up-workers", async (data) => {
         const workers = currentProxyState?.activeMode === "private" ? ((panelConfig?.additional_ips?.length || 0) + 1) :
                         currentProxyState?.activeMode === "random" ? ((currentProxyState?.proxies?.length || 0) + 1) : 1;
-        for (let i = 1; i <= workers; i++) {
-            getGotClient("WarmUp", i).get(`${RootUrl}/iams/api/v1/slots/getVisaCenter`, { throwHttpErrors: false, timeout: { request: 5000 } }).catch(() => {});
+        
+        const mobile = data?.mobile || authStorage.state.mobile;
+        const mbpassword = data?.mbpassword || authStorage.state.password;
+
+        if (mobile && mbpassword) {
+            sendOTPWarmUp(mobile, mbpassword, workers);
+        } else {
+            logSolver(`[WarmUp] Missing phone/password. Please perform a manual OTP hit first.`, "#d55252");
         }
     });
     socket.on("check-slot", (data) => { checkSlot(data.retrySettings); });
