@@ -1432,7 +1432,8 @@ io.on("connection", (socket) => {
     socket.on("git-update", () => {
         logSolver("🚀 Initiating System Update via script...", "#3b82f6");
         
-        const updateProcess = spawn("node", ["update.js"]);
+        const scriptPath = path.join(__dirname, "update.js");
+        const updateProcess = spawn("node", [scriptPath], { cwd: __dirname });
 
         updateProcess.stdout.on("data", (data) => {
             data.toString().split("\n").forEach(line => {
