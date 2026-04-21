@@ -37,12 +37,12 @@ function getNetworkOpts(workerId = null) {
     
     if (currentProxyState.activeMode === "private") {
         const ip = getLocalAddress(workerId);
-        if (!ip || ip === "0.0.0.0") return baseOpts;
+        if (ip && ip !== "0.0.0.0") return { ...baseOpts, localAddress: ip };
+    }
     
-        return {
-            ...baseOpts,
-            localAddress: ip
-        };
+    // In "native" mode, bind to main_ip if configured
+    if (currentProxyState.activeMode === "native" && panelConfig?.main_ip && panelConfig.main_ip !== "0.0.0.0") {
+        return { ...baseOpts, localAddress: panelConfig.main_ip };
     }
     
     return baseOpts;
@@ -129,7 +129,16 @@ const tlsSessionCache = new Map();
 function getGotClient(taskName, workerId) {
     const proxyUrl = getProxyUrl(taskName, workerId, true);
     const netOpts = getNetworkOpts(workerId);
-    const key = `${currentProxyState?.activeMode || 'native'}-${workerId}-${proxyUrl || 'none'}`;
+    
+    // Logic for conditional connection sharing:
+    // If Mode is Native, all workers share the same instance (and thus same TLS connection).
+    // Otherwise, each worker maintains its own isolated connection instance.
+    let key;
+    if (currentProxyState?.activeMode === 'native') {
+        key = `native-shared-${proxyUrl || 'none'}`;
+    } else {
+        key = `${currentProxyState?.activeMode || 'native'}-${workerId}-${proxyUrl || 'none'}`;
+    }
     if (!workerNetworkClients.has(key)) {
         const client = gotScraping.extend({
             http2: true,
@@ -563,8 +572,8 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__) {
             TaskManager.removeController(taskName, controller);
         } catch (err) {
             if (err.name !== "AbortError" && __IVAC_RETRY__?.enabled) {
-                logSolver(`Send OTP Cross Error`, '#d55252');
-                return TaskManager.setTimeout(taskName, trySend, 0);
+                logSolver(`${wTag} Send OTP Cross Error: ${err.message}`, '#d55252');
+                return TaskManager.setTimeout(taskName, trySend, 1000);
             }
             TaskManager.removeController(taskName, controller);
             finishBtn("reserveOtp", "Reserve OTP");
@@ -621,7 +630,7 @@ async function sendOTPWarmUp(mobile, mbpassword, workers) {
             TaskManager.removeController(taskName, controller);
         } catch (err) {
             if (err.name !== "AbortError") {
-                logSolver(`${wTag} Send OTP WarmUp Cross Error`, '#d55252');
+                logSolver(`${wTag} Send OTP WarmUp Cross Error: ${err.message}`, '#d55252');
             }
             TaskManager.removeController(taskName, controller);
         }
@@ -784,8 +793,8 @@ async function sendOtp(mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue) {
         } catch (err) {
             if (err.name !== "AbortError" && __IVAC_RETRY__?.enabled) {
                 captchaToken = null;
-                logSolver(`Send OTP Cross Error [W${workerId}]`, '#d55252');
-                return TaskManager.setTimeout(taskName, () => trySend(workerId), 0);
+                logSolver(`${wTag} Send OTP Cross Error: ${err.message}`, '#d55252');
+                return TaskManager.setTimeout(taskName, () => trySend(workerId), 1000);
             }
             TaskManager.removeController(taskName, controller);
             finishBtn("sendOtp", "Send OTP", "none");
