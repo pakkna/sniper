@@ -217,7 +217,10 @@ function scheduleAutoClick() {
                     socket.emit("pre-solve-batch", 2);
                 }},
                 { time: 10000, label: "Conn Warmup", action: () => {
-                    socket.emit("warm-up-workers");
+                    socket.emit("warm-up-workers", { 
+                        mobile: $("mb").value.trim(), 
+                        mbpassword: $("mbpass").value.trim() 
+                    });
                 }}
             ];
 
@@ -251,7 +254,41 @@ function scheduleAutoClick() {
 }
 
 // SOCKET EVENTS
-socket.on("status", ({ msg, type }) => showStatus(msg, type));
+socket.on("status", ({ msg, type }) => {
+    showStatus(msg, type);
+    if (msg === "Unauthorized!") {
+        // HARD RELOCK: Hide the panel from the DOM
+        const app = $("app-container");
+        if (app) app.style.setProperty("display", "none", "important");
+
+        // Show login overlay
+        const overlay = $("login-overlay");
+        if (overlay) {
+            overlay.style.display = 'flex';
+            overlay.style.opacity = '1';
+            overlay.style.backdropFilter = 'blur(10px)';
+        }
+        
+        const loginBtn = $("login-btn");
+        if (loginBtn) {
+            loginBtn.textContent = "Sign In";
+            loginBtn.style.background = "";
+        }
+    }
+});
+
+socket.on("disconnect", () => {
+    // HARD RELOCK on connection loss
+    const app = $("app-container");
+    if (app) app.style.setProperty("display", "none", "important");
+    
+    const overlay = $("login-overlay");
+    if (overlay) {
+        overlay.style.display = 'flex';
+        overlay.style.opacity = '1';
+        overlay.style.backdropFilter = 'blur(10px)';
+    }
+});
 socket.on("solver-log", ({ msg, color, json }) => logSolver(msg, color, json));
 socket.on("state-sync", (state) => {});
 
@@ -610,10 +647,7 @@ if (btnCheck) {
 }
 
 // PANEL LOGIN LOGIC
-const authExpiry = localStorage.getItem("ivac_panel_session");
-if (authExpiry && Date.now() < parseInt(authExpiry)) {
-    $("login-overlay").style.display = 'none';
-}
+// (Secured: No more auto-bypass. Server-side session is required for every refresh)
 
 const loginBtn = $("login-btn");
 if (loginBtn) {
@@ -632,7 +666,12 @@ if (loginBtn) {
                     const overlay = $("login-overlay");
                     overlay.style.opacity = '0';
                     overlay.style.backdropFilter = 'blur(0px)';
-                    setTimeout(() => overlay.style.display = 'none', 500);
+                    setTimeout(() => {
+                        overlay.style.display = 'none';
+                        // UNLOCK THE PANEL UI
+                        const app = $("app-container");
+                        if (app) app.style.setProperty("display", "flex", "important");
+                    }, 500);
                 }, 400);
             } else {
                 $("login-error").style.display = 'block';

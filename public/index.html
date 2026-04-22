@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>IVAC High-Speed Sniper</title>
+    <title>High-Speed Sniper</title>
     <!-- We extract the exact CSS rules from the injected DOM script and apply them here -->
     <style>
         body {
@@ -66,7 +66,7 @@
         #signinTab { display: flex; flex-direction: column; gap: 6px; transition: all 0.3s; }
         #signinTab.hidden { display: none; }
         
-        #app-container { display: flex; gap: 5px !important; align-items: stretch; width: 80% !important; max-width: 900px !important; padding: 5px; box-sizing: border-box; justify-content: center; margin: auto; }
+        #app-container { display: none !important; gap: 5px !important; align-items: stretch; width: 80% !important; max-width: 900px !important; padding: 5px; box-sizing: border-box; justify-content: center; margin: auto; }
         @media (max-width: 720px) { 
             body { height: auto; align-items: flex-start; padding: 20px 0; }
             #app-container { flex-direction: column; align-items: center; gap: 10px !important; } 
@@ -132,7 +132,7 @@
 <!-- LOGIN OVERLAY -->
 <div id="login-overlay">
   <div class="login-card" id="login-card">
-    <h2 class="login-title">IVAC Sniper Panel</h2>
+    <h2 class="login-title">Sniper Panel Login</h2>
     <p class="login-subtitle">Secure System Authentication</p>
     <form onsubmit="return false;">
       <input type="text" id="panel-user" placeholder="Username" autocomplete="username">

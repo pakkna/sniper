@@ -6,6 +6,7 @@ import { createServer } from "http";
 import path from "path";
 import { Server } from "socket.io";
 import { fileURLToPath } from "url";
+import { customLookup } from "./dnsconfig.js";
 import { encryptCaptchaToken } from "./tokenEncrypt.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -142,10 +143,13 @@ function getGotClient(taskName, workerId) {
     if (!workerNetworkClients.has(key)) {
         const client = gotScraping.extend({
             http2: true,
-            dnsCache: true,
+            lookup: customLookup,
             throwHttpErrors: false,
             retry: { limit: 0 },
-            timeout: { request: 120000 },
+            timeout: { 
+                request: 120000, 
+                connect: 30000 
+            },
             proxyUrl: proxyUrl,
             hooks: {
                 beforeRequest: [
@@ -1350,36 +1354,47 @@ async function payNow(__IVAC_RETRY__, isBatch = false) {
 // SOCKET ROUTES
 // ==========================================
 io.on("connection", (socket) => {
+    socket.authenticated = false;
     UI_SOCKET = socket;
     console.log("UI Connected:", socket.id);
 
-    socket.on("stop-all", () => {
+    const secure = (handler) => (data, cb) => {
+        if (!socket.authenticated) {
+            socket.emit("status", { msg: "Unauthorized!", type: "error" });
+            if (typeof cb === "function") cb(false);
+            return;
+        }
+        return handler(data, cb);
+    };
+
+    socket.on("stop-all", secure(() => {
         TaskManager.stopAll();
         showStatus("Stopped All Backend Tasks", "error");
-    });
+    }));
     
     socket.on("panel-login", (data, cb) => {
         if (data?.user === panelConfig.user && data?.pass === panelConfig.pass) {
+            socket.authenticated = true;
             cb(true);
         } else {
             cb(false);
         }
     });
     
-    socket.on("send-otp", (data) => { sendOtp(data.mobile, data.mbpassword, data.retrySettings, data.oldOtp); });
-    socket.on("verify-otp", (data) => { verifyOtpAggressive(data.mobile, data.otp, data.retrySettings); });
-    socket.on("reserve-slot", (data) => { reserveSlotAggressive(data.retrySettings); });
-    socket.on("pay-now", (data) => { payNow(data.retrySettings); });
+    socket.on("send-otp", secure((data) => { sendOtp(data.mobile, data.mbpassword, data.retrySettings, data.oldOtp); }));
+    socket.on("verify-otp", secure((data) => { verifyOtpAggressive(data.mobile, data.otp, data.retrySettings); }));
+    socket.on("reserve-slot", secure((data) => { reserveSlotAggressive(data.retrySettings); }));
+    socket.on("pay-now", secure((data) => { payNow(data.retrySettings); }));
     
-    socket.on("get-session-data", () => {
+    socket.on("get-session-data", secure(() => {
         if (authStorage.state.isAuthenticated || authStorage.state.token) {
             socket.emit("receive-session-data", authStorage);
         }
-    });
+    }));
 
-    socket.on("get-otp", (data) => { pollOtpLoop(data.mobile, data.retrySettings, true); });
-    socket.on("reserve-otp", (data) => { reserveOtp(data.email,data.mobile, data.retrySettings); });
-    socket.on("warm-up-workers", async (data) => {
+    socket.on("get-otp", secure((data) => { pollOtpLoop(data.mobile, data.retrySettings, true); }));
+    socket.on("reserve-otp", secure((data) => { reserveOtp(data.email,data.mobile, data.retrySettings); }));
+    socket.on("warm-up-workers", secure(async (data) => {
         const workers = currentProxyState?.activeMode === "private" ? ((panelConfig?.additional_ips?.length || 0) + 1) :
                         currentProxyState?.activeMode === "random" ? ((currentProxyState?.proxies?.length || 0) + 1) : 1;
         
@@ -1391,12 +1406,12 @@ io.on("connection", (socket) => {
         } else {
             logSolver(`[WarmUp] Missing phone/password. Please perform a manual OTP hit first.`, "#d55252");
         }
-    });
-    socket.on("check-slot", (data) => { checkSlot(data.retrySettings); });
-    socket.on("cap-settings", (data) => { CapInfo = data; logSolver("Server received new Captcha Settings.", "#10b981"); });
-    socket.on("proxy-state", (state) => { currentProxyState = state; workerNetworkClients.clear(); logSolver(`✔ Proxy Engine mapped to: ${state.activeMode}`, "#3b82f6"); });
+    }));
+    socket.on("check-slot", secure((data) => { checkSlot(data.retrySettings); }));
+    socket.on("cap-settings", secure((data) => { CapInfo = data; logSolver("Server received new Captcha Settings.", "#10b981"); }));
+    socket.on("proxy-state", secure((state) => { currentProxyState = state; workerNetworkClients.clear(); logSolver(`✔ Proxy Engine mapped to: ${state.activeMode}`, "#3b82f6"); }));
     
-    socket.on("test-proxy", async (data) => {
+    socket.on("test-proxy", secure(async (data) => {
         const { index, proxy } = data;
         const startTime = performance.now();
         const credentials = (proxy.user && proxy.pass) ? `${proxy.user}:${proxy.pass}@` : "";
@@ -1414,9 +1429,9 @@ io.on("connection", (socket) => {
         } catch (e) {
             socket.emit("test-proxy-result", { index, success: false, status: e.code || e.message || "Error" });
         }
-    });
+    }));
     
-    socket.on("hard-reset", () => {
+    socket.on("hard-reset", secure(() => {
         TaskManager.stopAll();
         workerNetworkClients.clear();
         preSolvedTokens = [];
@@ -1450,9 +1465,9 @@ io.on("connection", (socket) => {
         logSolver("> SOFTWARE Restart successfully", "#10b981");
         logSolver("> ==============================", "#10b981");
         showStatus("Server System Reset", "success");
-    });
+    }));
     
-    socket.on("git-update", () => {
+    socket.on("git-update", secure(() => {
         logSolver("🚀 Initiating System Update via script...", "#3b82f6");
         
         const scriptPath = path.join(__dirname, "update.js");
@@ -1477,14 +1492,14 @@ io.on("connection", (socket) => {
                 logSolver("✅ System Update Cycle Completed.", "#10b981");
             }
         });
-    });
+    }));
     
-    socket.on("pre-solve", () => { queueToken(); });
-    socket.on("pre-solve-batch", (size = 2) => { 
+    socket.on("pre-solve", secure(() => { queueToken(); }));
+    socket.on("pre-solve-batch", secure((size = 2) => { 
         logSolver(`[System] Batch Solving ${size} Captchas...`, "#3b82f6");
         for(let i=0; i<size; i++) queueToken(); 
-    });
-    socket.on("sms-list", async (data) => {
+    }));
+    socket.on("sms-list", secure(async (data) => {
         if (!data.mobile) return showStatus("Enter Mobile Number", "error");
         try {
             const res = await gotScraping(`https://sms.mrshuvo.xyz/ivac/${data.mobile}`, { responseType: "json" });
@@ -1498,7 +1513,7 @@ io.on("connection", (socket) => {
         } catch (e) {
             showStatus("Failed to fetch SMS", "error");
         }
-    });
+    }));
 });
 
 const PORT = panelConfig.port || 5000;
