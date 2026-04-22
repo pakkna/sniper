@@ -153,8 +153,13 @@ function getGotClient(taskName, workerId) {
             hooks: {
                 beforeRequest: [
                     (options) => {
-                        // DNS Overriding logic for HTTP/2 compatibility
-                        if (!directApi && dnsMap[options.url.hostname]) {
+                        // Selective DNS Overriding logic for HTTP/2 compatibility
+                        const path = options.url.pathname;
+                        const isReservation = path.includes('/slots/reserveSlot') || 
+                                              path.includes('/payment/ssl/initiate') || 
+                                              path.includes('/file-confirmation-and-slot-status');
+
+                        if (!directApi && isReservation && dnsMap[options.url.hostname]) {
                             const originalHost = options.url.hostname;
                             const fixedIp = dnsMap[originalHost];
                             
