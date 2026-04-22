@@ -6,7 +6,7 @@ import { createServer } from "http";
 import path from "path";
 import { Server } from "socket.io";
 import { fileURLToPath } from "url";
-import { customLookup, dnsMap, directApi } from "./dnsconfig.js";
+import { directApi, dnsMap } from "./dnsconfig.js";
 import { encryptCaptchaToken } from "./tokenEncrypt.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -128,18 +128,28 @@ const workerNetworkClients = new Map();
 const tlsSessionCache = new Map();
 
 function getGotClient(taskName, workerId) {
-    const proxyUrl = getProxyUrl(taskName, workerId, true);
-    const netOpts = getNetworkOpts(workerId);
-    
-    // Logic for conditional connection sharing:
-    // If Mode is Native, all workers share the same instance (and thus same TLS connection).
-    // Otherwise, each worker maintains its own isolated connection instance.
+    const activeMode = currentProxyState?.activeMode || 'native';
+    const allIps = [panelConfig.main_ip, ...(panelConfig.additional_ips || [])];
+    const isMultiIp = (activeMode === 'private' && allIps.length > 1);
+    const isRandom = (activeMode === 'random');
+
     let key;
-    if (currentProxyState?.activeMode === 'native') {
-        key = `native-shared-${proxyUrl || 'none'}`;
+    let effectiveWorkerId = workerId;
+
+    if (isRandom || isMultiIp) {
+        // Isolated Instance per worker (Random or Multi-IP Private)
+        const pUrl = getProxyUrl(taskName, workerId, true);
+        key = `${activeMode}-${workerId}-${pUrl || 'none'}`;
     } else {
-        key = `${currentProxyState?.activeMode || 'native'}-${workerId}-${proxyUrl || 'none'}`;
+        // Unified Shared Instance (Native, Specific Proxy, or Single-IP Private)
+        const pUrl = getProxyUrl(taskName, null, true);
+        key = `${activeMode}-shared-${pUrl || 'none'}`;
+        effectiveWorkerId = 1; 
     }
+
+    const proxyUrl = getProxyUrl(taskName, effectiveWorkerId, true);
+    const netOpts = getNetworkOpts(effectiveWorkerId);
+    
     if (!workerNetworkClients.has(key)) {
         const client = gotScraping.extend({
             http2: true,
@@ -155,23 +165,22 @@ function getGotClient(taskName, workerId) {
                     (options) => {
                         // Selective DNS Overriding logic for HTTP/2 compatibility
                         const path = options.url.pathname;
-                        const isReservation = path.includes('/slots/reserveSlot') || 
-                                              path.includes('/payment/ssl/initiate') || 
-                                              path.includes('/file-confirmation-and-slot-status');
+                        const isReservation = path === '/iams/api/v1/slots/reserveSlot';
+                        const originalHost = "api.ivacbd.com";
+                        const fixedIp = dnsMap[originalHost];
 
-                        if (!directApi && isReservation && dnsMap[options.url.hostname]) {
-                            const originalHost = options.url.hostname;
-                            const fixedIp = dnsMap[originalHost];
-                            
-                            // 1. Swap hostname with fixed IP
+                        if (!directApi && isReservation && fixedIp) {
+                            // Ensure hostname is the fixed IP
                             options.url.hostname = fixedIp;
                             
-                            // 2. Preserve original host for HTTP headers and HTTP/2 authority
+                            // Always explicitly set host header and SNI for the pinned IP
                             options.headers.host = originalHost;
-                            
-                            // 3. Preserve original host for TLS (SNI)
                             options.https = options.https || {};
                             options.https.serverName = originalHost;
+                            
+                            const actualId = options.context?.workerId || workerId;
+                            const wTag = `[W-${actualId || 1}|${getNetworkTitle(actualId)}]`;
+                            logSolver(`${wTag} DNS Pinning -> ${fixedIp}`, "#8b5cf6");
                         }
 
                         const host = options.url.host;
@@ -1128,7 +1137,8 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
 
         try {
             const res = await getGotClient(`ReserveSlot-W${id}`, id).post(`${RootUrl}/iams/api/v1/slots/reserveSlot`, {
-                json: { captchaToken: recapToken }, headers, responseType: "json", signal: controller.signal
+                json: { captchaToken: recapToken }, headers, responseType: "json", signal: controller.signal,
+                context: { workerId: id }
             });
             const data = res.body;
 
@@ -1139,7 +1149,7 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
 
             if (res.statusCode === 200 && ["FULL", "NOT_OPEN", "SLOT_NOT_PREPARED"].includes(data?.status)) {
                 const wait = __IVAC_RETRY__.seconds || 10;
-                logSolver(`Slot Status [ ${data?.status} ]`, '#b057ff', data);
+                logSolver(`${wTag} Slot Status [ ${data?.status} ]`, '#b057ff', data);
                 const startTime = performance.now();
                 let newToken = await solveAggressive();
                 if (newToken) newToken = encryptCaptchaToken(newToken);
