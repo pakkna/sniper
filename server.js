@@ -170,17 +170,21 @@ function getGotClient(taskName, workerId) {
                         const fixedIp = dnsMap[originalHost];
 
                         if (!directApi && isReservation && fixedIp) {
-                            // Ensure hostname is the fixed IP
+                            // 1. Swap hostname with fixed IP
                             options.url.hostname = fixedIp;
                             
-                            // Always explicitly set host header and SNI for the pinned IP
+                            // 2. Explicitly set headers for both HTTP/1.1 and HTTP/2
                             options.headers.host = originalHost;
+                            // Some HTTP/2 implementations require :authority to be set manually if hostname is an IP
+                            options.headers[':authority'] = originalHost;
+                            
+                            // 3. Ensure TLS SNI is set correctly
                             options.https = options.https || {};
                             options.https.serverName = originalHost;
                             
+                            // Log the pinning for visibility
                             const actualId = options.context?.workerId || workerId;
-                            const wTag = `[W-${actualId || 1}|${getNetworkTitle(actualId)}]`;
-                            logSolver(`${wTag} DNS Pinning -> ${fixedIp}`, "#8b5cf6");
+                            const title = getNetworkTitle(actualId);
                         }
 
                         const host = options.url.host;
@@ -1113,7 +1117,7 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
         const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
         logSolver(`${wTag} ReserveSlot Started`, "#3b82f6");
 
-        const onFail = (waitMs) => {
+        const onFail = (waitMs, reuseToken = null) => {
             if (__IVAC_RETRY__.logic === "batch" && activeCount > 1) {
                 batchFailed++;
                 if (batchFailed === activeCount && !successTriggered) {
@@ -1122,7 +1126,7 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                     TaskManager.setTimeout("reserveSlot", () => reserveSlotAggressive(__IVAC_RETRY__, true), batchWait);
                 }
             } else {
-                TaskManager.setTimeout("reserveSlot", () => worker(id, 0, null), waitMs);
+                TaskManager.setTimeout("reserveSlot", () => worker(id, 0, reuseToken), waitMs);
             }
         };
 
@@ -1157,9 +1161,9 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
 
                 const elapsed = (performance.now() - startTime) / 1000;
                 const reqDelay = Math.max(wait - elapsed, 0);
-                logSolver(`ReserveSlot Next Hit ${reqDelay.toFixed(2)}s`);
+                logSolver(`${wTag} ReserveSlot Next Hit ${reqDelay.toFixed(2)}s`);
                 TaskManager.removeController("reserveSlot", controller);
-                return onFail(reqDelay * 1000);
+                return onFail(reqDelay * 1000, newToken);
             }
 
             if (res.statusCode !== 200) {
@@ -1216,7 +1220,7 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                  if ([403, 503, 429].includes(res.statusCode)) {
                      const reqDelay = Math.max(waitMs - (performance.now() - startTime), 0); 
                      logSolver(`${wTag} Next Hit ${(reqDelay/1000).toFixed(2)}s`);
-                     return onFail(reqDelay);
+                     return onFail(reqDelay, null);
                  }
 
                  let newToken = await solveAggressive();
@@ -1227,7 +1231,7 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                  const reqDelay = Math.max(waitMs - elapsed, 0); 
                  logSolver(`${wTag} Next Hit ${(reqDelay/1000).toFixed(2)}s`);
                  
-                 return onFail(reqDelay);
+                 return onFail(reqDelay, newToken);
             }
 
         } catch (e) {
@@ -1241,8 +1245,8 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                 if (newToken) newToken = encryptCaptchaToken(newToken);
                 const elapsed = (performance.now() - startTime) / 1000;
                 const reqDelay = Math.max(wait - elapsed, 0);
-                logSolver(`ReserveSlot Next Hit ${reqDelay.toFixed(2)}s`);
-                return onFail(reqDelay * 1000);
+                logSolver(`${wTag} ReserveSlot Next Hit ${reqDelay.toFixed(2)}s`);
+                return onFail(reqDelay * 1000, newToken);
             }
         }
     };
