@@ -251,7 +251,17 @@ const CAPTCHA_TTL = 120000;
 
 // Auth Store
 let authStorage = {
-    state: { token: null, userId: null, requestId: null, mobile: null, email: null, password: null },
+    state: { 
+        token: null, 
+        userId: null, 
+        expiresAt: 899,
+        isAuthenticated: false,
+        isVerified: false,
+        requestId: null, 
+        phone: null, 
+        password: null,
+        otpSentAt: null 
+    },
     version: 0
 };
 const getAuthToken = () => authStorage.state.token;
@@ -541,10 +551,10 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__) {
                 logSolver(`${wTag} ReserveOtp Send Success`, '#16a34a', data);
 
                 sendOtpWorkerCount = 0;
-                //authStorage.state.token = data.data?.accessToken;
                 authStorage.state.userId = data.data?.userId;
                 authStorage.state.requestId = data.data?.requestId;
-                authStorage.state.email = email;
+                authStorage.state.phone = mobile;
+                authStorage.state.otpSentAt = Date.now();
                 isReserveOtpSend = true;
                 TaskManager.setTimeout('GetOtp', () => pollOtpLoop(mobile, __IVAC_RETRY__), 1000);
                 
@@ -716,8 +726,9 @@ async function sendOtp(mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue) {
                 if (isReserveOtpSend && authStorage.state.requestId) {
                     authStorage.state.token = data.data?.accessToken;
                     authStorage.state.userId = data.data?.userId;
-                    authStorage.state.mobile = mobile;
+                    authStorage.state.phone = mobile;
                     authStorage.state.password = mbpassword;
+                    authStorage.state.otpSentAt = Date.now();
                     
                     isReserveOtpSend = false;
                     const boxOtpValid = oldOtpBoxValue && oldOtpBoxValue !== "Invalid" && oldOtpBoxValue.length === 6;
@@ -738,8 +749,9 @@ async function sendOtp(mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue) {
                     authStorage.state.token = data.data?.accessToken;
                     authStorage.state.userId = data.data?.userId;
                     authStorage.state.requestId = data.data?.requestId;
-                    authStorage.state.mobile = mobile;
+                    authStorage.state.phone = mobile;
                     authStorage.state.password = mbpassword;
+                    authStorage.state.otpSentAt = Date.now();
                     
                     isReserveOtpSend = false;
                     
@@ -1125,8 +1137,8 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                          TaskManager.stopAll();
                          logSolver(`ReserveSlot 401 Expired (After 5:10 PM). Auto Re-login...`, '#dc2626');
                          showStatus("Session Expired, auto re-login...", "error");
-                         if (authStorage.state.mobile && authStorage.state.password) {
-                             sendOtp(authStorage.state.mobile, authStorage.state.password, __IVAC_RETRY__);
+                         if (authStorage.state.phone && authStorage.state.password) {
+                             sendOtp(authStorage.state.phone, authStorage.state.password, __IVAC_RETRY__);
                          }
                          return;
                      } else {
@@ -1361,7 +1373,7 @@ io.on("connection", (socket) => {
     
     socket.on("get-session-data", () => {
         if (authStorage.state.isAuthenticated || authStorage.state.token) {
-            socket.emit("receive-session-data", authStorage.state);
+            socket.emit("receive-session-data", authStorage);
         }
     });
 
@@ -1371,7 +1383,7 @@ io.on("connection", (socket) => {
         const workers = currentProxyState?.activeMode === "private" ? ((panelConfig?.additional_ips?.length || 0) + 1) :
                         currentProxyState?.activeMode === "random" ? ((currentProxyState?.proxies?.length || 0) + 1) : 1;
         
-        const mobile = data?.mobile || authStorage.state.mobile;
+        const mobile = data?.mobile || authStorage.state.phone;
         const mbpassword = data?.mbpassword || authStorage.state.password;
 
         if (mobile && mbpassword) {
@@ -1422,12 +1434,14 @@ io.on("connection", (socket) => {
         
         authStorage.state = {
             token: null,
+            expiresAt: 899,
             isAuthenticated: false,
             isVerified: false,
-            mobile: null,
+            phone: null,
             password: null,
             requestId: null,
-            userId: null
+            userId: null,
+            otpSentAt: null
         };
         
         socket.emit("hide-export-session");

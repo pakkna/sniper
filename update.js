@@ -27,6 +27,20 @@ try {
     console.log("❌ Result: Failed to update the system");
 }
 
+// console.log("------- [ ADD HOST IP ] -------");
+// try {
+//     // Adding Host IP to /etc/hosts
+//     execSync(`sudo sed -i '/api\\.ivacbd\\.com/d' /etc/hosts && echo "13.232.227.28 api.ivacbd.com" | sudo tee -a /etc/hosts > /dev/null`, { stdio: "ignore" });
+
+//     //execSync("sudo sed -i '/api\.ivacbd\.com/d' /etc/hosts", { stdio: "ignore" });
+//     execSync("sudo systemctl restart systemd-resolved", { stdio: "ignore" });
+
+//     console.log("✅ Host IP added successfully!");
+// } catch (error) {
+//     console.error("❌ Failed to add Host IP. Error:", error.message);
+// }
+ 
+
 console.log("------- [ RESTARTING ENGINE ] -------");
 try {
     console.log("🚀 Server Restart successfully!");
