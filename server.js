@@ -6,7 +6,7 @@ import { createServer } from "http";
 import path from "path";
 import { Server } from "socket.io";
 import { fileURLToPath } from "url";
-import { customLookup } from "./dnsconfig.js";
+import { customLookup, dnsMap, directApi } from "./dnsconfig.js";
 import { encryptCaptchaToken } from "./tokenEncrypt.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -143,7 +143,6 @@ function getGotClient(taskName, workerId) {
     if (!workerNetworkClients.has(key)) {
         const client = gotScraping.extend({
             http2: true,
-            lookup: customLookup,
             throwHttpErrors: false,
             retry: { limit: 0 },
             timeout: { 
@@ -154,6 +153,22 @@ function getGotClient(taskName, workerId) {
             hooks: {
                 beforeRequest: [
                     (options) => {
+                        // DNS Overriding logic for HTTP/2 compatibility
+                        if (!directApi && dnsMap[options.url.hostname]) {
+                            const originalHost = options.url.hostname;
+                            const fixedIp = dnsMap[originalHost];
+                            
+                            // 1. Swap hostname with fixed IP
+                            options.url.hostname = fixedIp;
+                            
+                            // 2. Preserve original host for HTTP headers and HTTP/2 authority
+                            options.headers.host = originalHost;
+                            
+                            // 3. Preserve original host for TLS (SNI)
+                            options.https = options.https || {};
+                            options.https.serverName = originalHost;
+                        }
+
                         const host = options.url.host;
                         if (tlsSessionCache.has(host)) {
                             options.https = options.https || {};
