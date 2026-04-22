@@ -136,8 +136,10 @@ function getGotClient(taskName, workerId) {
     let key;
     let effectiveWorkerId = workerId;
 
-    if (isRandom || isMultiIp) {
-        // Isolated Instance per worker (Random or Multi-IP Private)
+    const isReservation = taskName && taskName.startsWith("ReserveSlot");
+
+    if (isRandom || isMultiIp || isReservation) {
+        // Isolated Instance per worker (Random, Multi-IP, or Reservation)
         const pUrl = getProxyUrl(taskName, workerId, true);
         key = `${activeMode}-${workerId}-${pUrl || 'none'}`;
     } else {
@@ -220,6 +222,37 @@ function getGotClient(taskName, workerId) {
         workerNetworkClients.set(key, client);
     }
     return workerNetworkClients.get(key);
+}
+
+function clearWorkerClient(taskName, workerId) {
+    const activeMode = currentProxyState?.activeMode || 'native';
+    const isReservation = taskName && taskName.startsWith("ReserveSlot");
+    const allIps = [panelConfig.main_ip, ...(panelConfig.additional_ips || [])];
+    const isMultiIp = (activeMode === 'private' && allIps.length > 1);
+    const isRandom = (activeMode === 'random');
+
+    let key;
+    if (isRandom || isMultiIp || isReservation) {
+        const pUrl = getProxyUrl(taskName, workerId, true);
+        key = `${activeMode}-${workerId}-${pUrl || 'none'}`;
+    } else {
+        const pUrl = getProxyUrl(taskName, null, true);
+        key = `${activeMode}-shared-${pUrl || 'none'}`;
+    }
+
+    if (workerNetworkClients.has(key)) {
+        workerNetworkClients.delete(key);
+        return true;
+    }
+    return false;
+}
+
+function clearTlsSession(host) {
+    if (tlsSessionCache.has(host)) {
+        tlsSessionCache.delete(host);
+        return true;
+    }
+    return false;
 }
 
 
@@ -1163,7 +1196,10 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                 const reqDelay = Math.max(wait - elapsed, 0);
                 logSolver(`${wTag} ReserveSlot Next Hit ${reqDelay.toFixed(2)}s`);
                 TaskManager.removeController("reserveSlot", controller);
-                return onFail(reqDelay * 1000, newToken);
+                
+                // If delay is large, don't pass the token to avoid it going stale
+                const tokenToReuse = (reqDelay < 15) ? newToken : null;
+                return onFail(reqDelay * 1000, tokenToReuse);
             }
 
             if (res.statusCode !== 200) {
@@ -1209,7 +1245,9 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                  else if ([400].includes(res.statusCode)) waitMs = 1000;
 
                  if (res.statusCode === 403) {
-                     logSolver(`${wTag} Slot Status [ 403 ]`, '#b057ff');
+                     logSolver(`${wTag} Slot Status [ 403 ] -> Hard Resetting Session`, '#b057ff');
+                     clearWorkerClient(`ReserveSlot-W${id}`, id);
+                     clearTlsSession("api.ivacbd.com");
                  } else {
                      logSolver(`${wTag} Slot Status [ ${res.statusCode} ]`, '#b057ff', data);
                  }
