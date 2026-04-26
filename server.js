@@ -575,9 +575,15 @@ async function pollOtpLoop(mobile, __IVAC_RETRY__, isManual = false) {
             pollingOtp = false;
             finishBtn("getOtp", "GET OTP", "none");
             
-            if (!isReserveOtpSend && __IVAC_RETRY__?.enabled) {
+            if (isReserveOtpSend) {
+                // Scenario A: Pre-warmup (Auto Hit) -> Find and STOP
+                PRE_FETCHED_OTP = foundOtp;
+                logSolver(`${isManual ? "[Manual]" : "[Auto]"} Pre-warmup OTP Found: ${foundOtp}. Standing by for hit...`, "#10b981");
+            } else if (__IVAC_RETRY__?.enabled) {
+                // Scenario B: Active verification (Manual or Fallback) -> VERIFY
                 const otpToUse = PRE_FETCHED_OTP || foundOtp;
                 PRE_FETCHED_OTP = null;
+                logSolver(`[Verify] OTP Found: ${otpToUse}. Starting verification...`, "#10b981");
                 verifyOtpAggressive(mobile, otpToUse, __IVAC_RETRY__);
             } else {
                 PRE_FETCHED_OTP = foundOtp;
@@ -842,9 +848,16 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
                     showStatus(data?.message || "Rate Limited! Searching OTP...", "error");
                     
                     if (email) {
-                        logSolver(`[429 Fallback] Clearing SMS cache & searching for pre-sent OTP...`, '#3b82f6');
+                        if (PRE_FETCHED_OTP && __IVAC_RETRY__?.enabled) {
+                            logSolver(`[429 Fallback] Using Pre-fetched OTP: ${PRE_FETCHED_OTP}`, '#10b981');
+                            const otpToUse = PRE_FETCHED_OTP;
+                            PRE_FETCHED_OTP = null;
+                            verifyOtpAggressive(mobile, otpToUse, __IVAC_RETRY__);
+                            return;
+                        }
+
+                        logSolver(`[429 Fallback] No pre-fetched OTP. Searching SMS API...`, '#3b82f6');
                         lastGetOtp = []; 
-                        PRE_FETCHED_OTP = null;
                         
                         getGotClient("CheckActiveSMS").get(`https://sms.mrshuvo.xyz/ivac/${mobile}`, { responseType: "json", timeout: { request: 5000 } })
                             .then(res => {
@@ -854,10 +867,10 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
                                     verifyOtpAggressive(mobile, otpData, __IVAC_RETRY__);
                                 } else {
                                     logSolver(`[429 Fallback] No OTP found. Triggering ReserveOTP...`, '#f59e0b');
-                                    reserveOtp(email, mobile, __IVAC_RETRY__);
+                                    reserveOtp(email, mobile, __IVAC_RETRY__, false); // false = not pre-warmup, verify immediately
                                 }
                             }).catch(() => {
-                                reserveOtp(email, mobile, __IVAC_RETRY__);
+                                reserveOtp(email, mobile, __IVAC_RETRY__, false);
                             });
                     } else {
                         logSolver(`Cannot fallback to ReserveOTP, no email matched!`, '#dc2626');
@@ -907,7 +920,7 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
         return showStatus("OTP or requestId missing", "error");
     }
     if (!accessToken) {
-        logSolver(`[Verify] Failed! Missing access token. You must successfully "Send OTP" first! If 429 Blocked, wait 6 mins or import session.`, "#ef4444");
+        logSolver(`[Verify] Failed! access token not found.`, "#ef4444");
         return showStatus("Missing access token", "error");
     }
 
