@@ -214,7 +214,7 @@ function scheduleAutoClick() {
                     socket.emit("reserve-otp", { email: $("email").value.trim(), mobile: $("mb").value.trim(), retrySettings: getRetrySettings() });
                 }},
                 { time: 20000, label: "Captcha Solves (2x)", action: () => {
-                    socket.emit("pre-solve-batch", 1);
+                    socket.emit("pre-solve-batch", 2);
                 }},
             ];
 
@@ -587,10 +587,29 @@ const btnReserveOtpBtn = $("reserveOtpBtn");
 if (btnReserveOtpBtn) {
     btnReserveOtpBtn.onclick = () => {
         btnReserveOtpBtn.innerHTML = "<span class='spin'>⏳</span>...";
+        
+        let isPreWarmupStr = false;
+        try {
+            const stored = localStorage.getItem("autoClickTimeMs");
+            if (stored && stored !== 'undefined') {
+                const timeStr = JSON.parse(stored).time || "17:00:00";
+                let [hour, minute, second] = timeStr.split(":").map(Number);
+                const bdNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" }));
+                const target = new Date(bdNow); target.setHours(hour, minute, second, 0);
+                
+                const diff = target.getTime() - bdNow.getTime();
+                // If the hit time is in the future (within the next 12 hours), we are BEFORE the hit time.
+                if (diff > 0 && diff < 12 * 60 * 60 * 1000) {
+                    isPreWarmupStr = true;
+                }
+            }
+        } catch(e) {}
+
         socket.emit("reserve-otp", {
             mobile: $("mb").value.trim(),
             email: $("email").value.trim(),
-            retrySettings: getRetrySettings()
+            retrySettings: getRetrySettings(),
+            isPreWarmup: isPreWarmupStr
         });
     };
 }
