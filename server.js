@@ -41,14 +41,16 @@ function generateSessionToken() {
 let currentProxyState = { activeMode: "native", proxies: [] };
 
 function getNetworkOpts(workerId = null) {
-    const baseOpts = {
+    const opts = {
         https: { rejectUnauthorized: false }
     };
 
-    // User requested that private mode should use the VPS main network directly.
-    // By returning baseOpts without specifying localAddress, Node.js will automatically
-    // route requests through the default system network interface (main VPS network).
-    return baseOpts;
+    const localAddress = getLocalAddress(workerId);
+    if (localAddress) {
+        opts.localAddress = localAddress;
+    }
+
+    return opts;
 }
 
 function getLocalAddress(workerId = null) {
@@ -323,8 +325,7 @@ let globalOtpVerified = false;
 let pollingOtp = false;
 let lastGetOtp = [];
 
-let captchaToken = null;
-let captchaCreatedAt = 0;
+let solversInProgress = 0;
 const CAPTCHA_TTL = 120000;
 
 // Auth Store
@@ -426,13 +427,12 @@ async function startWorkerCapSolver(id, signal) {
 let preSolvedTokens = [];
 let PRE_FETCHED_OTP = null;
 
-async function queueToken() {
-    // logSolver("Pre-solving captcha started...", "#3b82f6");
+async function queueToken(force = false) {
+    if (!force && (preSolvedTokens.length + solversInProgress >= 1)) return false;
     UI_SOCKET?.emit("btn-reset", { id: "solver", text: "Solving API..." });
     const token = await __solveAggressive();
     if (token) {
         preSolvedTokens.push({ token, time: Date.now() });
-        // logSolver(`Captcha Reserved! [POOL-${preSolvedTokens.length}]`, "#10b981");
         UI_SOCKET?.emit("btn-reset", { id: "solver", text: `🧩 Solver (${preSolvedTokens.length})` });
         return true;
     } else {
@@ -442,26 +442,43 @@ async function queueToken() {
 }
 
 async function solveAggressive() {
+    // 1. Check pool
     while (preSolvedTokens.length > 0) {
         const item = preSolvedTokens.shift();
         if (Date.now() - item.time <= 80000) {
-            // logSolver(`Consumed a pre-solved token. Remaining: ${preSolvedTokens.length}`, "#f59e0b");
             UI_SOCKET?.emit("btn-reset", { id: "solver", text: preSolvedTokens.length > 0 ? `🧩 Solver (${preSolvedTokens.length})` : "🧩 Solver" });
             return item.token;
-        } else {
-            // logSolver(`Removed expired Captcha token (>80s).`, "#dc2626");
-            UI_SOCKET?.emit("btn-reset", { id: "solver", text: preSolvedTokens.length > 0 ? `🧩 Solver (${preSolvedTokens.length})` : "🧩 Solver" });
         }
     }
+
+    // 2. If already solving, wait for it
+    if (solversInProgress > 0) {
+        while (solversInProgress > 0) {
+            await new Promise(r => setTimeout(r, 500));
+            // After wait, check pool again
+            while (preSolvedTokens.length > 0) {
+                const item = preSolvedTokens.shift();
+                if (Date.now() - item.time <= 80000) {
+                    UI_SOCKET?.emit("btn-reset", { id: "solver", text: preSolvedTokens.length > 0 ? `🧩 Solver (${preSolvedTokens.length})` : "🧩 Solver" });
+                    return item.token;
+                }
+            }
+        }
+        // If solvers finished but pool still empty, start our own
+        return solveAggressive(); 
+    }
+
     return await __solveAggressive();
 }
 
 async function __solveAggressive() {
-    logSolver("🧩 API Captcha Solving...", "#3b82f6");
     if (!CapInfo?.type || !CapInfo?.key) {
         logSolver("No Cap API keys set! Auto solve disabled.", "#dc2626");
         return null;
     }
+    
+    solversInProgress++;
+    logSolver("🧩 API Captcha Solving...", "#3b82f6");
     
     const taskName = "captchaSolver";
     const controller = TaskManager.start(taskName);
@@ -484,6 +501,7 @@ async function __solveAggressive() {
     } catch (e) {
         if (!signal.aborted) logSolver(`⚠️ API Captcha Solve Failed`, "#ef4444");
     } finally {
+        solversInProgress--;
         TaskManager.removeController(taskName, controller);
     }
     return null;
@@ -600,19 +618,13 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
         const wTag = `[W-${workerId}|${getNetworkTitle(workerId)}]`;
         logSolver(`${wTag} ReserveOTP Started`, "#3b82f6");
         try {
-            const now = Date.now();
-            const expired = (now - captchaCreatedAt) > CAPTCHA_TTL;
-            
             let tokenToUse;
             if (oldTokenToUse) {
                 tokenToUse = oldTokenToUse;
-            } else if (!captchaToken || expired) {
-                captchaToken = await solveAggressive();
-                captchaCreatedAt = Date.now();
-                tokenToUse = captchaToken;
             } else {
-                tokenToUse = captchaToken;
+                tokenToUse = await solveAggressive();
             }
+            if (!tokenToUse) { finishBtn("reserveOtp", "Reserve OTP"); return showStatus("Captcha failed", "error"); }
 
             const payload = { email, "otpChannel": "PHONE", captchaToken: tokenToUse };
             const res = await getGotClient(`ReserveOTP-W${workerId}`, workerId).post(`${RootUrl}/iams/api/v1/forgot-password/sendOtp`, {
@@ -731,19 +743,13 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
         const wTag = `[W-${workerId}|${getNetworkTitle(workerId)}]`;
         logSolver(`${wTag} SendOTP Started`, "#3b82f6");
         try {
-            const now = Date.now();
-            const expired = (now - captchaCreatedAt) > CAPTCHA_TTL;
-
             let tokenToUse;
             if (oldTokenToUse) {
                 tokenToUse = oldTokenToUse;
-            } else if (!captchaToken || expired) {
-                captchaToken = await solveAggressive();
-                captchaCreatedAt = Date.now();
-                tokenToUse = captchaToken;
             } else {
-                tokenToUse = captchaToken;
+                tokenToUse = await solveAggressive();
             }
+            if (!tokenToUse) { finishBtn("sendOtp", "Send OTP"); return showStatus("Captcha failed", "error"); }
 
             const payload = { captchaToken: tokenToUse, phone: mobile, password: mbpassword };
 
@@ -766,7 +772,6 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
                 isReserveStarted = false;
                 isOtpVerifyAggressive = false;
                 globalOtpVerified = false;
-                captchaToken = null;
 
                 if (isReserveOtpSend && authStorage.state.requestId) {
                     authStorage.state.token = data.data?.accessToken;
@@ -1252,7 +1257,6 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
         if (successTriggered || controller.signal.aborted) return;
 
         const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
-        logSolver(`${wTag} ReserveSlot Started`, "#3b82f6");
 
         const onFail = (waitMs, reuseToken = null) => {
             if (__IVAC_RETRY__.logic === "batch" && activeCount > 1) {
@@ -1276,8 +1280,10 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
             recapToken = reuseToken;
         } else {
             let newToken = await solveAggressive();
-            if (newToken) recapToken = encryptCaptchaToken(newToken);
-            else { finishBtn("reserveSlot", "Reserve Slot", "none"); return showStatus("Auto captcha solve failed!", "error"); }
+            if (newToken) { 
+                recapToken = encryptCaptchaToken(newToken);
+                logSolver(`${wTag} ReserveSlot Started`, "#3b82f6");
+            } else { finishBtn("reserveSlot", "Reserve Slot", "none"); return showStatus("Auto captcha solve failed!", "error"); }
         }
 
         try {
@@ -1295,19 +1301,12 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
             if (res.statusCode === 200 && ["FULL", "NOT_OPEN", "SLOT_NOT_PREPARED"].includes(data?.status)) {
                 const wait = __IVAC_RETRY__.seconds || 10;
                 logSolver(`${wTag} Slot Status [ ${data?.status} ]`, '#b057ff', data);
-                const startTime = performance.now();
-                let newToken = await solveAggressive();
-                if (newToken) newToken = encryptCaptchaToken(newToken);
-                else return showStatus("Auto captcha solve failed!", "error");
-
-                const elapsed = (performance.now() - startTime) / 1000;
-                const reqDelay = Math.max(wait - elapsed, 0);
-                logSolver(`${wTag} ReserveSlot Next Hit ${reqDelay.toFixed(2)}s`);
-                TaskManager.removeController("reserveSlot", controller);
                 
-                // If delay is large, don't pass the token to avoid it going stale
-                const tokenToReuse = (reqDelay < 15) ? newToken : null;
-                return onFail(reqDelay * 1000, tokenToReuse);
+                queueToken(); // Trigger solve in background if pool empty
+
+                logSolver(`${wTag} ReserveSlot Next Hit ${wait}s`);
+                TaskManager.removeController("reserveSlot", controller);
+                return onFail(wait * 1000, null);
             }
 
             if (res.statusCode !== 200) {
@@ -1363,23 +1362,15 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                  }
 
                  TaskManager.removeController("reserveSlot", controller);
-                 const startTime = performance.now();
                  
                  if ([403, 503, 429].includes(res.statusCode)) {
-                     const reqDelay = Math.max(waitMs - (performance.now() - startTime), 0); 
-                     logSolver(`${wTag} Next Hit ${(reqDelay/1000).toFixed(2)}s`);
-                     return onFail(reqDelay, null);
-                 }
+                      logSolver(`${wTag} Next Hit ${(waitMs/1000).toFixed(2)}s`);
+                      return onFail(waitMs, null);
+                  }
 
-                 let newToken = await solveAggressive();
-                 if (newToken) newToken = encryptCaptchaToken(newToken);
-                 else return showStatus("Auto captcha solve failed!", "error");
-
-                 const elapsed = performance.now() - startTime;
-                 const reqDelay = Math.max(waitMs - elapsed, 0); 
-                 logSolver(`${wTag} Next Hit ${(reqDelay/1000).toFixed(2)}s`);
-                 
-                 return onFail(reqDelay, newToken);
+                  queueToken(); // Trigger solve in background
+                  logSolver(`${wTag} Next Hit ${(waitMs/1000).toFixed(2)}s`);
+                  return onFail(waitMs, null);
             }
 
         } catch (e) {
@@ -1388,13 +1379,9 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
             if (__IVAC_RETRY__?.enabled) {
                 const wait = __IVAC_RETRY__.seconds || 10;
                 logSolver(`ReserveSlot Status Cross/Error`, '#b057ff');
-                const startTime = performance.now();
-                let newToken = await solveAggressive();
-                if (newToken) newToken = encryptCaptchaToken(newToken);
-                const elapsed = (performance.now() - startTime) / 1000;
-                const reqDelay = Math.max(wait - elapsed, 0);
-                logSolver(`${wTag} ReserveSlot Next Hit ${reqDelay.toFixed(2)}s`);
-                return onFail(reqDelay * 1000, newToken);
+                queueToken();
+                logSolver(`${wTag} ReserveSlot Next Hit ${wait}s`);
+                return onFail(wait * 1000, null);
             }
         }
     };
@@ -1649,8 +1636,9 @@ io.on("connection", (socket) => {
     socket.on("hard-reset", secure(() => {
         TaskManager.stopAll();
         workerNetworkClients.clear();
+        currentProxyState.activeMode = "native";
         preSolvedTokens = [];
-        captchaToken = null;
+        solversInProgress = 0;
         PRE_FETCHED_OTP = null;
         lastGetOtp = [];
         isReserveOtpSend = false;
