@@ -192,6 +192,8 @@ function scheduleAutoClick() {
     
     const targetMs = target.getTime();
     window.reserveOtpSent = false;
+    window.fired_50000 = false;
+    window.fired_20000 = false;
     
     if (window.autoTimer) clearInterval(window.autoTimer);
     if (window.reserveTimeout) clearTimeout(window.reserveTimeout);
@@ -208,23 +210,25 @@ function scheduleAutoClick() {
         const diff = targetMs - now;
 
         // Precision Timing Checkpoints
-        if (diff <= 50000 && diff > 0) {
-            const checkpoints = [
-                { time: 50000, label: "ReserveOTP", action: () => {
-                    socket.emit("reserve-otp", { email: $("email").value.trim(), mobile: $("mb").value.trim(), retrySettings: getRetrySettings() });
-                }},
-                { time: 20000, label: "Captcha Solves (2x)", action: () => {
-                    socket.emit("pre-solve-batch", 2);
-                }},
-            ];
+        const checkpoints = [
+            { time: 50000, label: "ReserveOTP", action: () => {
+                socket.emit("reserve-otp", { 
+                    email: $("email").value.trim(), 
+                    mobile: $("mb").value.trim(), 
+                    retrySettings: getRetrySettings(),
+                    isPreWarmup: true 
+                });
+            }},
+            { time: 20000, label: "Captcha Solves (2x)", action: () => {
+                socket.emit("pre-solve-batch", 2);
+            }},
+        ];
 
-            for (const cp of checkpoints) {
-                if (diff <= cp.time && diff > (cp.time - 1000) && !window[`fired_${cp.time}`]) {
-                    window[`fired_${cp.time}`] = true;
-                    cp.action();
-                    logSolver(`[Auto] Firing Checkpoint: ${cp.label} (${cp.time/1000}s)`, "#3b82f6");
-                    break; 
-                }
+        for (const cp of checkpoints) {
+            if (diff > 0 && diff <= cp.time && !window[`fired_${cp.time}`]) {
+                window[`fired_${cp.time}`] = true;
+                cp.action();
+                logSolver(`[Auto] Firing Checkpoint: ${cp.label} (${cp.time/1000}s)`, "#3b82f6");
             }
         }
         
