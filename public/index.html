@@ -226,21 +226,22 @@
           <button class="btn-sms" id="smsList">SMS List</button>
         </div>
         <div class="row">
-          <button class="btn-send" id="sendOtp">Send OTP</button>
-          <button id="reserveOtpBtn" style="background: linear-gradient(90deg, #f59e0b, #d97706); color: #fff; padding: 7px 10px; border-radius: 6px; border: none; font-size: 12px; cursor: pointer; flex-shrink: 0;">Reserve OTP</button>
-          <button class="btn-verify" id="verifyOtp">Verify OTP</button>
-          <button class="btn-save" id="saveInfo">Save Info</button>
+          <button class="btn-send" id="sendOtp" style="flex:1;">Send OTP</button>
+          <button id="reserveOtpBtn" style="flex:1; background: linear-gradient(90deg, #f59e0b, #d97706); color: #fff; padding: 7px 10px; border-radius: 6px; border: none; font-size: 12px; cursor: pointer; flex-shrink: 0;">Reserve OTP</button>
+          <button class="btn-verify" id="verifyOtp" style="flex:1;">Verify OTP</button>
+        </div>
+        <div class="row">
+          <button class="btn-save" id="saveInfo" style="flex:1;">Save Info</button>
+          <button class="btn-otp" id="clearInfo" style="flex:1; background: linear-gradient(90deg, #64748b, #475569); color: #fff; padding: 7px 10px; border-radius: 6px; border: none; font-size: 12px; cursor: pointer;">Clear Info</button>
+          <button class="btn-payNow" id="stopAll" style="flex: 1; padding: 7px 10px; font-weight: bold; border-radius: 6px; border: none; font-size: 12px; cursor: pointer;">Stop All</button>
         </div>
         
         <fieldset class="paymentInfo">
           <legend>Payment Info</legend>
           <div class="row">
-            <button class="btn-checkSlot" id="checkSlot">Check Slot</button>
-            <button class="btn-reserveSlot" id="reserveSlot">Reserve Slot</button>
-            <button class="btn-payNow" id="payNow">Pay Now</button>
-          </div>
-          <div class="row" style="margin-top: 8px;">
-            <button class="btn-payNow" id="stopAll" style="flex: 1; padding: 8px; font-weight: bold; letter-spacing: 1px; font-size: 13px;">STOP ALL TASKS</button>
+            <button class="btn-checkSlot" id="checkFile" style="flex:1;">Check File</button>
+            <button class="btn-reserveSlot" id="reserveSlot" style="flex:1;">Reserve Slot</button>
+            <button class="btn-payNow" id="payNow" style="flex:1;">Pay Now</button>
           </div>
           <br>
           <div id="link-btn" align="center">Developed By @TechBro</div>

@@ -19,12 +19,23 @@ const io = new Server(server, { cors: { origin: "*" } });
 app.use(express.static(path.join(__dirname, "public")));
 app.use(express.json());
 
-let panelConfig = { user: "admin", pass: "admin123", ip: "0.0.0.0", port: 5000, main_ip: "", additional_ips: [] };
+let panelConfig = { user: "admin", pass: "admin123", ip: "0.0.0.0", port: 5000, main_ip: "", additional_ips: [], saved_mobile: "", saved_email: "", saved_password: "", capInfo: { type: null, key: null } };
 try {
     const cf = fs.readFileSync(path.join(__dirname, "config.json"), "utf8");
     panelConfig = { ...panelConfig, ...JSON.parse(cf) };
 } catch (e) {
     fs.writeFileSync(path.join(__dirname, "config.json"), JSON.stringify(panelConfig, null, 2));
+}
+
+// SECURE SESSION CONFIG
+const SESSION_SECRET = "30c4e9e9e8104bfe1458348b69037995d8ed7d1fc407bfaab359dd59b6838862";
+let currentSessionToken = null;
+let sessionExpiry = 0;
+
+function generateSessionToken() {
+    currentSessionToken = Math.random().toString(36).substring(2) + Date.now().toString(36);
+    sessionExpiry = Date.now() + (5 * 60 * 60 * 1000); // 5 Hours exactly as requested
+    return currentSessionToken;
 }
 
 let currentProxyState = { activeMode: "native", proxies: [] };
@@ -34,18 +45,9 @@ function getNetworkOpts(workerId = null) {
         https: { rejectUnauthorized: false }
     };
 
-    if (!currentProxyState) return baseOpts;
-    
-    if (currentProxyState.activeMode === "private") {
-        const ip = getLocalAddress(workerId);
-        if (ip && ip !== "0.0.0.0") return { ...baseOpts, localAddress: ip };
-    }
-    
-    // In "native" mode, bind to main_ip if configured
-    if (currentProxyState.activeMode === "native" && panelConfig?.main_ip && panelConfig.main_ip !== "0.0.0.0") {
-        return { ...baseOpts, localAddress: panelConfig.main_ip };
-    }
-    
+    // User requested that private mode should use the VPS main network directly.
+    // By returning baseOpts without specifying localAddress, Node.js will automatically
+    // route requests through the default system network interface (main VPS network).
     return baseOpts;
 }
 
@@ -137,9 +139,12 @@ function getGotClient(taskName, workerId) {
     let effectiveWorkerId = workerId;
 
     const isReservation = taskName && taskName.startsWith("ReserveSlot");
+    const originalHost = "api.ivacbd.com";
+    const fixedIpMap = dnsMap[originalHost];
+    const isMultiFixedIp = Array.isArray(fixedIpMap) && fixedIpMap.length > 1;
 
-    if (isRandom || isMultiIp || isReservation) {
-        // Isolated Instance per worker (Random, Multi-IP, or Reservation)
+    if (isRandom || isMultiIp || (isReservation && isMultiFixedIp)) {
+        // Isolated Instance per worker (Random, Multi-IP, or Reservation with Multi-FixedIp)
         const pUrl = getProxyUrl(taskName, workerId, true);
         key = `${activeMode}-${workerId}-${pUrl || 'none'}`;
     } else {
@@ -166,7 +171,9 @@ function getGotClient(taskName, workerId) {
                         const path = options.url.pathname;
                         const isReservation = path === '/iams/api/v1/slots/reserveSlot';
                         const originalHost = "api.ivacbd.com";
-                        const fixedIp = dnsMap[originalHost];
+                        const fixedIpMap = dnsMap[originalHost];
+                        const currentWorkerId = options.context?.workerId || workerId || 1;
+                        const fixedIp = Array.isArray(fixedIpMap) ? fixedIpMap[(currentWorkerId - 1) % fixedIpMap.length] : fixedIpMap;
 
                         if (!directApi && isReservation && fixedIp) {
                             // 1. Swap hostname with fixed IP
@@ -224,12 +231,16 @@ function getGotClient(taskName, workerId) {
 function clearWorkerClient(taskName, workerId) {
     const activeMode = currentProxyState?.activeMode || 'native';
     const isReservation = taskName && taskName.startsWith("ReserveSlot");
+    const originalHost = "api.ivacbd.com";
+    const fixedIpMap = dnsMap[originalHost];
+    const isMultiFixedIp = Array.isArray(fixedIpMap) && fixedIpMap.length > 1;
+    
     const allIps = [panelConfig.main_ip, ...(panelConfig.additional_ips || [])];
     const isMultiIp = (activeMode === 'private' && allIps.length > 1);
     const isRandom = (activeMode === 'random');
 
     let key;
-    if (isRandom || isMultiIp || isReservation) {
+    if (isRandom || isMultiIp || (isReservation && isMultiFixedIp)) {
         const pUrl = getProxyUrl(taskName, workerId, true);
         key = `${activeMode}-${workerId}-${pUrl || 'none'}`;
     } else {
@@ -333,7 +344,7 @@ let authStorage = {
 };
 const getAuthToken = () => authStorage.state.token;
 
-let CapInfo = { type: null, key: null };
+let CapInfo = panelConfig.capInfo || { type: null, key: null };
 const TRANSIT_SITE_KEY = "0x4AAAAAACghKkJHL1t7UkuZ";
 const SITE_URL = "https://appointment.ivacbd.com";
 
@@ -1041,6 +1052,93 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
     }
 }
 
+async function uploadFile(socket, data) {
+    if (!authStorage.state.token) {
+        socket.emit("upload-file-result", { success: false, message: "No auth token" });
+        return;
+    }
+    
+    try {
+        const buffer = Buffer.from(data.base64, 'base64');
+        const blob = new Blob([buffer], { type: 'application/pdf' });
+        
+        const form = new FormData();
+        form.append("file", blob, data.name);
+        form.append("isPrimary", data.isPrimary);
+
+        const client = getGotClient("UploadFile", 1);
+        
+        const response = await client.post(`${SITE_URL}/iams/api/v1/file/upload-file`, {
+            headers: {
+                "Authorization": `Bearer ${authStorage.state.token}`
+            },
+            body: form,
+            responseType: "json"
+        });
+
+        socket.emit("upload-file-result", { success: true, data: response.body });
+    } catch (err) {
+        const bodyStr = err.response?.body;
+        let jsonData = null;
+        try {
+            if (typeof bodyStr === "string") jsonData = JSON.parse(bodyStr);
+            else if (typeof bodyStr === "object") jsonData = bodyStr;
+        } catch(e){}
+        
+        if (jsonData) {
+            socket.emit("upload-file-result", { success: true, data: jsonData }); 
+        } else {
+            socket.emit("upload-file-result", { success: false, message: err.message });
+        }
+    }
+}
+
+async function checkFile(socket) {
+    if (TaskManager.tasks["checkFile"]?.controllers.size) {
+        TaskManager.stopTask("checkFile");
+        socket.emit("check-file-response", { status: "aborted" });
+        return;
+    }
+    
+    if (!authStorage.state.token) {
+        socket.emit("check-file-response", { status: "token-expired" });
+        return;
+    }
+
+    const controller = TaskManager.start("checkFile");
+    const client = getGotClient("CheckFile", 1);
+    
+    try {
+        const response = await client.post(`${SITE_URL}/iams/api/v1/file/overview`, {
+            headers: {
+                "Authorization": `Bearer ${authStorage.state.token}`
+            },
+            responseType: "json"
+        });
+        
+        TaskManager.stopTask("checkFile");
+        
+        const data = response.body;
+        if (data?.successFlag && data?.data && typeof data.data === 'object' && Object.keys(data.data).length > 0) {
+            let activeFiles = data.data; 
+            if (!Array.isArray(activeFiles)) activeFiles = [activeFiles];
+            socket.emit("check-file-response", { status: "success", data: activeFiles });
+        } else {
+            socket.emit("check-file-response", { status: "no-data" });
+        }
+    } catch (err) {
+        TaskManager.stopTask("checkFile");
+        const status = err.response?.statusCode;
+        if (status === 401) {
+            socket.emit("check-file-response", { status: "token-expired" });
+        } else if (status === 500) {
+            socket.emit("check-file-response", { status: "error", message: "No file uploaded" });
+        } else {
+            socket.emit("check-file-response", { status: "error", message: err.message });
+        }
+    }
+}
+
 async function checkSlot(__IVAC_RETRY__) {
     const taskName = "checkSlot";
     if (TaskManager.tasks[taskName]?.controllers.size) {
@@ -1159,8 +1257,12 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
         const onFail = (waitMs, reuseToken = null) => {
             if (__IVAC_RETRY__.logic === "batch" && activeCount > 1) {
                 batchFailed++;
+                if (!worker.maxBatchWait || waitMs > worker.maxBatchWait) {
+                    worker.maxBatchWait = waitMs;
+                }
                 if (batchFailed === activeCount && !successTriggered) {
-                    const batchWait = 500 + Math.floor(Math.random() * 300);
+                    const batchWait = worker.maxBatchWait > 5000 ? worker.maxBatchWait : 500 + Math.floor(Math.random() * 300);
+                    worker.maxBatchWait = 0;
                     logSolver(`[Batch] All ${activeCount} workers failed. Retrying in ${batchWait}ms...`, "#fbbf24");
                     TaskManager.setTimeout("reserveSlot", () => reserveSlotAggressive(__IVAC_RETRY__, true), batchWait);
                 }
@@ -1304,6 +1406,7 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
         numWorkersToStart = parseInt(__IVAC_RETRY__.mode, 10) || 3;
     }
     activeCount = numWorkersToStart;
+    if (isBatch) reserveSlotWorkerCount = 0;
 
     let currentDelay = 0;
     for (let i = 0; i < numWorkersToStart; i++) {
@@ -1458,11 +1561,40 @@ io.on("connection", (socket) => {
     socket.on("panel-login", (data, cb) => {
         if (data?.user === panelConfig.user && data?.pass === panelConfig.pass) {
             socket.authenticated = true;
+            const token = generateSessionToken();
+            cb({ success: true, token });
+            socket.emit("initial-config", {
+                mobile: panelConfig.saved_mobile || "",
+                email: panelConfig.saved_email || "",
+                password: panelConfig.saved_password || "",
+                capInfo: panelConfig.capInfo || { type: null, key: null }
+            });
+        } else {
+            cb({ success: false });
+        }
+    });
+
+    socket.on("panel-session-login", (data, cb) => {
+        if (data?.token && data.token === currentSessionToken && Date.now() < sessionExpiry) {
+            socket.authenticated = true;
             cb(true);
+            socket.emit("initial-config", {
+                mobile: panelConfig.saved_mobile || "",
+                email: panelConfig.saved_email || "",
+                password: panelConfig.saved_password || "",
+                capInfo: panelConfig.capInfo || { type: null, key: null }
+            });
         } else {
             cb(false);
         }
     });
+
+    socket.on("save-file-info", secure((data) => {
+        panelConfig.saved_mobile = data.mobile;
+        panelConfig.saved_email = data.email;
+        panelConfig.saved_password = data.password;
+        fs.writeFileSync(path.join(__dirname, "config.json"), JSON.stringify(panelConfig, null, 2));
+    }));
     
     socket.on("send-otp", secure((data) => { sendOtp(data.email, data.mobile, data.mbpassword, data.retrySettings, data.oldOtp); }));
     socket.on("verify-otp", secure((data) => { verifyOtpAggressive(data.mobile, data.otp, data.retrySettings); }));
@@ -1478,7 +1610,14 @@ io.on("connection", (socket) => {
     socket.on("get-otp", secure((data) => { pollOtpLoop(data.mobile, data.retrySettings, true); }));
     socket.on("reserve-otp", secure((data) => { reserveOtp(data.email,data.mobile, data.retrySettings, data.isPreWarmup); }));
     socket.on("check-slot", secure((data) => { checkSlot(data.retrySettings); }));
-    socket.on("cap-settings", secure((data) => { CapInfo = data; logSolver("Server received new Captcha Settings.", "#10b981"); }));
+    socket.on("check-file", secure(() => { checkFile(socket); }));
+    socket.on("upload-file", secure((data) => { uploadFile(socket, data); }));
+    socket.on("cap-settings", secure((data) => { 
+        CapInfo = data; 
+        panelConfig.capInfo = data;
+        fs.writeFileSync(path.join(__dirname, "config.json"), JSON.stringify(panelConfig, null, 2));
+        logSolver("Server received new Captcha Settings.", "#10b981"); 
+    }));
     socket.on("proxy-state", secure((state) => { 
         currentProxyState = state; 
         workerNetworkClients.clear(); 

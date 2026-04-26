@@ -5,13 +5,18 @@ import dns from 'node:dns';
 export const directApi = false; 
 
 export const dnsMap = {
-    "api.ivacbd.com": "65.0.229.15"
+    "api.ivacbd.com": [
+        "65.0.229.15",
+        "35.154.147.88",
+        "35.154.173.251"
+    ]
 };
 
 export const customLookup = (hostname, options, callback) => {
     if (!directApi && dnsMap[hostname]) {
-        // Resolve to the fixed IP
-        return callback(null, dnsMap[hostname], 4);
+        const ipOrArray = dnsMap[hostname];
+        const fixedIp = Array.isArray(ipOrArray) ? ipOrArray[Math.floor(Math.random() * ipOrArray.length)] : ipOrArray;
+        return callback(null, fixedIp, 4);
     }
     return dns.lookup(hostname, options, callback);
 };

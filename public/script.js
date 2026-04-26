@@ -105,7 +105,7 @@ if (capSave) {
             socket.emit("cap-settings", CapInfo);
             updateCaptchaTitle();
             $("captchaModal").classList.add("hidden");
-            showStatus("Captcha Key Saved", "success");
+            showStatus("Captcha Key Saved Globally", "success");
         } else {
             showStatus("API Key cannot be empty", "error");
         }
@@ -286,6 +286,16 @@ socket.on("disconnect", () => {
 socket.on("solver-log", ({ msg, color, json }) => logSolver(msg, color, json));
 socket.on("state-sync", (state) => {});
 
+socket.on("initial-config", (config) => {
+    if (config.mobile) $("mb").value = config.mobile;
+    if (config.email) $("email").value = config.email;
+    if (config.password) $("mbpass").value = config.password;
+    if (config.capInfo && config.capInfo.key) {
+        CapInfo = config.capInfo;
+        updateCaptchaTitle();
+    }
+});
+
 socket.on("show-reservation-success-popup", (data) => {
     savePaymentInfo(null, data?.userId);
     let m = document.getElementById("success-popup-modal");
@@ -441,12 +451,15 @@ loadInfo();
 console.log("🎯 IVAC Sniper Script Initialized Successfully");
 
 $("saveInfo").onclick = () => {
-    localStorage.setItem("file_info", JSON.stringify({
-        mobile: $("mb").value.trim(),
-        email: $("email").value.trim(),
-        password: $("mbpass").value.trim(),
-    }));
-    showStatus("Saved!", "success");
+    const mobile = $("mb").value.trim();
+    const email = $("email").value.trim();
+    const password = $("mbpass").value.trim();
+    
+    localStorage.setItem("file_info", JSON.stringify({ mobile, email, password }));
+    
+    socket.emit("save-file-info", { mobile, email, password });
+    
+    showStatus("Saved Globally!", "success");
 };
 
 socket.on("btn-reset", ({ id, text, stepStatus, activeStep }) => {
@@ -664,12 +677,413 @@ if (btnPay) {
     };
 }
 
-const btnCheck = $("checkSlot");
+const btnCheck = $("checkFile");
 if (btnCheck) {
     btnCheck.onclick = () => {
         btnCheck.textContent = "Loading...";
-        socket.emit("check-slot", { retrySettings: getRetrySettings() });
+        socket.emit("check-file", { retrySettings: getRetrySettings() });
     };
+}
+
+const btnClear = $("clearInfo");
+if (btnClear) {
+    btnClear.onclick = () => {
+        $("mb").value = "";
+        $("email").value = "";
+        $("mbpass").value = "";
+        localStorage.removeItem("file_info");
+        socket.emit("save-file-info", { mobile: "", email: "", password: "" });
+        showStatus("Info Cleared", "success");
+    };
+}
+
+const SHOW_PDF_UPLOAD = true;
+
+socket.on("check-file-response", (res) => {
+    const btn = $("checkFile");
+    if(btn) btn.textContent = "Check File";
+    if (res.status === "success") {
+        showStatus("File found", "success");
+        showDetailsPopup(res.data);
+    } else if (res.status === "no-data") {
+        showStatus("No data found!", "error");
+    } else if (res.status === "token-expired") {
+        showStatus("Session Expired!", "error");
+        logSolver("Session Expired!");
+        showUploadPopup();
+    } else if (res.status === "error") {
+        showStatus("No file uploaded", "error");
+        logSolver("No file uploaded!");
+        showUploadPopup();
+    }
+});
+
+function showUploadPopup() {
+    let m = document.getElementById("upload-modal");
+    if (m) m.remove();
+
+    const panel = document.getElementById("ivac-panel");
+    const rect = panel ? panel.getBoundingClientRect() : { top: 70, left: 60, width: 320, height: 400 };
+    const panelMidY = rect.top + (rect.height || 400) / 2;
+
+    m = document.createElement("div");
+    m.id = "upload-modal";
+    Object.assign(m.style, {
+        position: "fixed", top: 0, left: 0, width: "100%", height: "100%",
+        background: "rgba(0,0,0,0.35)",
+        zIndex: 2147483647, fontFamily: "system-ui,-apple-system,Segoe UI"
+    });
+
+    const c = document.createElement("div");
+    Object.assign(c.style, {
+        position: "fixed",
+        left: Math.max(0, rect.left) + "px",
+        width: rect.width + "px",
+        background: "linear-gradient(145deg, #fff, #f0f0f0)", color: "#1a1a1a",
+        padding: "15px", borderRadius: "12px",
+        boxShadow: "0 20px 50px rgba(0,0,0,.4)",
+        fontSize: "13px",
+        boxSizing: "border-box"
+    });
+
+    requestAnimationFrame(() => {
+        const popH = c.getBoundingClientRect().height;
+        let topPos = panelMidY - popH / 2;
+        topPos = Math.max(10, Math.min(topPos, window.innerHeight - popH - 10));
+        c.style.top = topPos + "px";
+    });
+
+    const closeBtn = document.createElement("div");
+    closeBtn.innerHTML = "&times;";
+    Object.assign(closeBtn.style, {
+        position: "absolute", top: "8px", right: "12px", fontSize: "22px", fontWeight: "bold",
+        cursor: "pointer", color: "#666", transition: "color 0.2s", lineHeight: "1"
+    });
+    closeBtn.onmouseenter = () => closeBtn.style.color = "#f44336";
+    closeBtn.onmouseleave = () => closeBtn.style.color = "#666";
+    closeBtn.onclick = () => m.remove();
+    c.appendChild(closeBtn);
+
+    const title = document.createElement("h3");
+    title.textContent = "No File Uploaded";
+    Object.assign(title.style, {
+        margin: "5px 0 12px", fontSize: "15px", color: "#c00", textAlign: "center",
+        borderBottom: "1px solid #ddd", paddingBottom: "10px"
+    });
+    c.appendChild(title);
+
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept = ".pdf";
+    Object.assign(fileInput.style, {
+        width: "100%", padding: "8px", border: "1px solid #d0d5dd",
+        borderRadius: "6px", background: "#fff", fontSize: "12px",
+        boxSizing: "border-box", cursor: "pointer"
+    });
+    c.appendChild(fileInput);
+
+    const uploadBtn = document.createElement("button");
+    uploadBtn.textContent = "Upload PDF";
+    Object.assign(uploadBtn.style, {
+        width: "100%", marginTop: "10px", padding: "9px",
+        background: "linear-gradient(90deg, #16a34a, #15803d)", color: "#fff",
+        border: "none", borderRadius: "6px", fontSize: "13px",
+        fontWeight: "600", cursor: "pointer", transition: "opacity 0.2s"
+    });
+    uploadBtn.onmouseenter = () => uploadBtn.style.opacity = "0.9";
+    uploadBtn.onmouseleave = () => uploadBtn.style.opacity = "1";
+    c.appendChild(uploadBtn);
+
+    const msgBox = document.createElement("div");
+    Object.assign(msgBox.style, {
+        marginTop: "10px", padding: "0", fontSize: "12px",
+        textAlign: "center", borderRadius: "6px", display: "none"
+    });
+    c.appendChild(msgBox);
+
+    const showMsg = (text, type) => {
+        msgBox.textContent = text;
+        msgBox.style.display = "block";
+        msgBox.style.padding = "8px";
+        if (type === "success") {
+            msgBox.style.background = "#dcfce7";
+            msgBox.style.color = "#166534";
+            msgBox.style.border = "1px solid #86efac";
+        } else {
+            msgBox.style.background = "#fee2e2";
+            msgBox.style.color = "#991b1b";
+            msgBox.style.border = "1px solid #fca5a5";
+        }
+    };
+
+    uploadBtn.onclick = async () => {
+        const file = fileInput.files[0];
+        if (!file) return showMsg("Please select a PDF file", "error");
+        if (!file.name.toLowerCase().endsWith(".pdf")) return showMsg("Only PDF files are allowed", "error");
+
+        uploadBtn.textContent = "Uploading...";
+        uploadBtn.style.opacity = "0.6";
+        uploadBtn.style.pointerEvents = "none";
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const base64 = e.target.result.split(',')[1];
+            socket.once("upload-file-result", (data) => {
+                if (data.success) {
+                    const valErrors = data?.data?.error;
+                    if (Array.isArray(valErrors) && valErrors.length > 0) {
+                        const errText = valErrors.map(err => '⚠ ' + err).join('\n');
+                        showMsg(errText, "error");
+                        msgBox.style.textAlign = "left";
+                        msgBox.style.whiteSpace = "pre-wrap";
+                        msgBox.style.fontSize = "11px";
+                        showStatus("Upload validation failed!", "error");
+                        logSolver(`Upload validation failed: ${valErrors.length} error(s)`, "#d97706");
+                        valErrors.forEach(err => logSolver(err, "#dc2626"));
+                        uploadBtn.textContent = "Upload PDF";
+                    } else {
+                        showMsg("File uploaded successfully! ✓", "success");
+                        logSolver("File uploaded successfully!", "#16a34a");
+                        showStatus("File uploaded!", "success");
+                        uploadBtn.textContent = "✓ Uploaded";
+                        uploadBtn.style.background = "#16a34a";
+                        setTimeout(() => m.remove(), 2000);
+                        return; // Keep pointer disabled
+                    }
+                } else {
+                    const errMsg = data?.message || "Upload failed!";
+                    showMsg(errMsg, "error");
+                    logSolver(`Upload failed: ${errMsg}`, "#dc2626");
+                    uploadBtn.textContent = "Upload PDF";
+                }
+                uploadBtn.style.opacity = "1";
+                uploadBtn.style.pointerEvents = "auto";
+            });
+            socket.emit("upload-file", { base64, name: file.name, isPrimary: "true" });
+        };
+        reader.readAsDataURL(file);
+    };
+
+    m.appendChild(c);
+    m.addEventListener("click", e => { if (e.target === m) m.remove(); });
+    document.body.appendChild(m);
+}
+
+function showDetailsPopup(dataList) {
+    let m = document.getElementById("details-modal");
+    if (m) m.remove();
+    
+    const panel = document.getElementById("ivac-panel");
+    const rect = panel ? panel.getBoundingClientRect() : { top: 70, left: 60, width: 320, height: 400 };
+    const panelMidY = rect.top + (rect.height || 400) / 2;
+
+    m = document.createElement("div");
+    m.id = "details-modal";
+    Object.assign(m.style, {
+        position: "fixed", top: 0, left: 0, width: "100%", height: "100%",
+        background: "rgba(0,0,0,0.35)",
+        zIndex: 2147483647, fontFamily: "system-ui,-apple-system,Segoe UI"
+    });
+
+    const c = document.createElement("div");
+    Object.assign(c.style, {
+        position: "fixed",
+        left: Math.max(0, rect.left) + "px",
+        width: rect.width + "px",
+        maxHeight: "80vh",
+        overflowY: "auto",
+        background: "linear-gradient(145deg, #fff, #f0f0f0)", color: "#1a1a1a",
+        padding: "15px", borderRadius: "12px", 
+        boxShadow: "0 20px 50px rgba(0,0,0,.4)",
+        fontSize: "13px",
+        boxSizing: "border-box"
+    });
+
+    requestAnimationFrame(() => {
+        const popH = c.getBoundingClientRect().height;
+        let topPos = panelMidY - popH / 2;
+        topPos = Math.max(10, Math.min(topPos, window.innerHeight - popH - 10));
+        c.style.top = topPos + "px";
+    });
+
+    const closeBtn = document.createElement("div");
+    closeBtn.innerHTML = "&times;";
+    Object.assign(closeBtn.style, {
+        position: "absolute", top: "8px", right: "12px", fontSize: "22px", fontWeight: "bold",
+        cursor: "pointer", color: "#666", transition: "color 0.2s", lineHeight: "1"
+    });
+    closeBtn.onmouseenter = () => closeBtn.style.color = "#f44336";
+    closeBtn.onmouseleave = () => closeBtn.style.color = "#666";
+    closeBtn.onclick = () => m.remove();
+    c.appendChild(closeBtn);
+
+    if (!dataList || dataList.length === 0) {
+        const txt = document.createElement("p");
+        txt.textContent = "No data available";
+        txt.style.textAlign = "center";
+        c.appendChild(txt);
+        m.appendChild(c);
+        document.body.appendChild(m);
+        return;
+    }
+
+    const firstObj = dataList[0];
+    const t = document.createElement("h3");
+    t.textContent = "File Details";
+    Object.assign(t.style, { marginTop: "5px", fontSize: "16px", color: "#111", borderBottom: "1px solid #ddd", paddingBottom: "10px", textAlign: "center" });
+    c.appendChild(t);
+
+    const summary = document.createElement("div");
+    Object.assign(summary.style, {
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+        background: "#e8ecf1", padding: "8px 10px", borderRadius: "8px",
+        marginBottom: "12px", fontSize: "11px", border: "1px solid #d0d5dd",
+        gap: "5px"
+    });
+    summary.innerHTML = `
+        <div style="display:flex; gap:3px; align-items:center;">
+            <span style="color:#555;">MS:</span>
+            <span style="color:#111; font-weight:600;">${firstObj.commissionName}</span>
+        </div>
+        <div style="width:1px; height:12px; background:#bbb;"></div>
+        <div style="display:flex; gap:3px; align-items:center;">
+            <span style="color:#555;">Type:</span>
+            <span style="color:#111; font-weight:600;">${firstObj.visaType}</span>
+        </div>
+        <div style="margin-left:auto;">
+            <span style="background:linear-gradient(90deg, #10b981, #059669); color:#fff; padding:2px 8px; border-radius:4px; font-weight:700; font-size:10px;">
+               Total: ${dataList.length}
+            </span>
+        </div>
+    `;
+    c.appendChild(summary);
+
+    const tableContainer = document.createElement("div");
+    tableContainer.style.maxHeight = "200px";
+    tableContainer.style.overflowY = "auto";
+    tableContainer.style.border = "1px solid #d0d5dd";
+    tableContainer.style.borderRadius = "6px";
+    tableContainer.style.background = "#fff";
+
+    const table = document.createElement("table");
+    table.style.width = "100%";
+    table.style.borderCollapse = "collapse";
+    table.style.fontSize = "12px";
+    
+    const thead = document.createElement("thead");
+    thead.innerHTML = `<tr><th style="border-bottom:1px solid #d0d5dd;padding:6px;text-align:left;background:#e8ecf1;position:sticky;top:0;color:#333;">Name</th><th style="border-bottom:1px solid #d0d5dd;padding:6px;text-align:left;background:#e8ecf1;position:sticky;top:0; border-left:1px solid #d0d5dd;color:#333;">BGD</th></tr>`;
+    table.appendChild(thead);
+
+    const tbody = document.createElement("tbody");
+    dataList.forEach((item, index) => {
+        const tr = document.createElement("tr");
+        tr.style.background = index % 2 === 0 ? "#fff": "#f5f7fa";
+        tr.innerHTML = `<td style="border-bottom:1px solid #e5e7eb;padding:6px;color:#222;">${item.fullName}</td><td style="border-bottom:1px solid #e5e7eb;padding:6px; color:#1d4ed8; font-weight:500; border-left:1px solid #e5e7eb;">${item.applicationId}</td>`;
+        tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    tableContainer.appendChild(table);
+    c.appendChild(tableContainer);
+
+    if (SHOW_PDF_UPLOAD && dataList.length < 4) {
+        const uploadSection = document.createElement("div");
+        Object.assign(uploadSection.style, {
+            marginTop: "10px", padding: "10px", background: "#e8ecf1",
+            borderRadius: "6px", border: "1px solid #d0d5dd"
+        });
+
+        const uploadLabel = document.createElement("div");
+        uploadLabel.textContent = "Add More Files";
+        Object.assign(uploadLabel.style, { fontSize: "12px", fontWeight: "600", color: "#333", marginBottom: "6px" });
+        uploadSection.appendChild(uploadLabel);
+
+        const fileInput2 = document.createElement("input");
+        fileInput2.type = "file";
+        fileInput2.accept = ".pdf";
+        Object.assign(fileInput2.style, {
+            width: "100%", padding: "5px", border: "1px solid #d0d5dd",
+            borderRadius: "4px", background: "#fff", fontSize: "11px",
+            boxSizing: "border-box", cursor: "pointer"
+        });
+        uploadSection.appendChild(fileInput2);
+
+        const uploadBtn2 = document.createElement("button");
+        uploadBtn2.textContent = "Upload PDF";
+        Object.assign(uploadBtn2.style, {
+            width: "100%", marginTop: "6px", padding: "7px",
+            background: "linear-gradient(90deg, #16a34a, #15803d)", color: "#fff",
+            border: "none", borderRadius: "4px", fontSize: "12px",
+            fontWeight: "600", cursor: "pointer", transition: "opacity 0.2s"
+        });
+        uploadSection.appendChild(uploadBtn2);
+
+        const msgBox2 = document.createElement("div");
+        Object.assign(msgBox2.style, {
+            marginTop: "6px", fontSize: "11px", textAlign: "center",
+            borderRadius: "4px", display: "none"
+        });
+        uploadSection.appendChild(msgBox2);
+
+        var showUploadMsg = function(text, type) {
+            msgBox2.textContent = text;
+            msgBox2.style.display = "block";
+            msgBox2.style.padding = "6px";
+            if (type === "success") {
+                msgBox2.style.background = "#dcfce7"; msgBox2.style.color = "#166534"; msgBox2.style.border = "1px solid #86efac";
+            } else {
+                msgBox2.style.background = "#fee2e2"; msgBox2.style.color = "#991b1b"; msgBox2.style.border = "1px solid #fca5a5";
+            }
+        };
+
+        uploadBtn2.onclick = async function() {
+            var file = fileInput2.files[0];
+            if (!file) return showUploadMsg("Select a PDF file", "error");
+            if (!file.name.toLowerCase().endsWith(".pdf")) return showUploadMsg("Only PDF allowed", "error");
+
+            uploadBtn2.textContent = "Uploading...";
+            uploadBtn2.style.opacity = "0.6";
+            uploadBtn2.style.pointerEvents = "none";
+            
+            var reader = new FileReader();
+            reader.onload = function(e) {
+                var base64 = e.target.result.split(',')[1];
+                socket.once("upload-file-result", function(rdata) {
+                     if (rdata.success) {
+                        var valErrors = rdata.data?.error;
+                        if (Array.isArray(valErrors) && valErrors.length > 0) {
+                            var errHtml = valErrors.map(function(err) { return '⚠ ' + err; }).join('\n');
+                            showUploadMsg(errHtml, "error");
+                            msgBox2.style.textAlign = "left";
+                            msgBox2.style.whiteSpace = "pre-wrap";
+                            msgBox2.style.fontSize = "11px";
+                            logSolver("Upload validation failed: " + valErrors.length + " error(s)", "#d97706");
+                            valErrors.forEach(function(err) { logSolver(err, "#dc2626"); });
+                            uploadBtn2.textContent = "Upload PDF";
+                        } else {
+                            showUploadMsg("Uploaded successfully! ✓", "success");
+                            logSolver("File uploaded!", "#16a34a");
+                            uploadBtn2.textContent = "✓ Uploaded";
+                            uploadBtn2.style.background = "#16a34a";
+                            return;
+                        }
+                    } else {
+                        var errMsg = (rdata && rdata.message) ? rdata.message : "Upload failed!";
+                        showUploadMsg(errMsg, "error");
+                        logSolver("Upload: " + errMsg, "#dc2626");
+                        uploadBtn2.textContent = "Upload PDF";
+                    }
+                    uploadBtn2.style.opacity = "1";
+                    uploadBtn2.style.pointerEvents = "auto";
+                });
+                socket.emit("upload-file", { base64: base64, name: file.name, isPrimary: "false" });
+            };
+            reader.readAsDataURL(file);
+        };
+        c.appendChild(uploadSection);
+    }
+    m.appendChild(c);
+    m.addEventListener("click", e => { if (e.target === m) m.remove(); });
+    document.body.appendChild(m);
 }
 
 // PANEL LOGIN LOGIC
@@ -682,23 +1096,12 @@ if (loginBtn) {
         const p = $("panel-pass").value.trim();
         loginBtn.textContent = "Authenticating...";
         
-        socket.emit("panel-login", { user: u, pass: p }, (success) => {
-            if (success) {
-                localStorage.setItem("ivac_panel_session", Date.now() + (20 * 60 * 60 * 1000));
+        socket.emit("panel-login", { user: u, pass: p }, (res) => {
+            if (res.success) {
+                localStorage.setItem("ivac_panel_session_token", res.token);
+                localStorage.setItem("ivac_panel_session_expiry", Date.now() + (5 * 60 * 60 * 1000));
                 
-                loginBtn.textContent = "Success ✓";
-                loginBtn.style.background = "linear-gradient(135deg, #16a34a, #15803d)";
-                setTimeout(() => {
-                    const overlay = $("login-overlay");
-                    overlay.style.opacity = '0';
-                    overlay.style.backdropFilter = 'blur(0px)';
-                    setTimeout(() => {
-                        overlay.style.display = 'none';
-                        // UNLOCK THE PANEL UI
-                        const app = $("app-container");
-                        if (app) app.style.setProperty("display", "flex", "important");
-                    }, 500);
-                }, 400);
+                unlockPanel();
             } else {
                 $("login-error").style.display = 'block';
                 loginBtn.textContent = "Sign In";
@@ -712,6 +1115,53 @@ if (loginBtn) {
         });
     };
 }
+
+function unlockPanel() {
+    const loginBtn = $("login-btn");
+    if (loginBtn) {
+        loginBtn.textContent = "Success ✓";
+        loginBtn.style.background = "linear-gradient(135deg, #16a34a, #15803d)";
+    }
+    
+    setTimeout(() => {
+        const overlay = $("login-overlay");
+        if (overlay) {
+            overlay.style.opacity = '0';
+            overlay.style.transition = '0.5s';
+            overlay.style.backdropFilter = 'blur(0px)';
+            setTimeout(() => {
+                overlay.style.display = 'none';
+                const app = $("app-container");
+                if (app) app.style.setProperty("display", "flex", "important");
+            }, 500);
+        }
+    }, 400);
+}
+
+// AUTO SESSION RESTORE
+(function() {
+    const token = localStorage.getItem("ivac_panel_session_token");
+    const expiry = localStorage.getItem("ivac_panel_session_expiry");
+    
+    if (token && expiry && Date.now() < parseInt(expiry)) {
+        // We have a potentially valid session, try to auth with socket
+        const checkSession = () => {
+            if (socket.connected) {
+                socket.emit("panel-session-login", { token }, (success) => {
+                   if (success) {
+                       unlockPanel();
+                   } else {
+                       localStorage.removeItem("ivac_panel_session_token");
+                       localStorage.removeItem("ivac_panel_session_expiry");
+                   }
+                });
+            } else {
+                setTimeout(checkSession, 100);
+            }
+        };
+        checkSession();
+    }
+})();
 
 socket.on("payment-link", (data) => {
     const url = typeof data === "string" ? data : data.url;
