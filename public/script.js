@@ -214,19 +214,14 @@ function scheduleAutoClick() {
     if (window.reserveTimeout) clearTimeout(window.reserveTimeout);
     if (window.autoClickTimeout) clearTimeout(window.autoClickTimeout);
     
-    // High-frequency active polling loop to bypass browser sleep-throttling
-    const runLoop = () => {
+    window.autoTimer = setInterval(() => {
         if (!toggleInput.checked) {
             clearInterval(window.autoTimer);
             return;
         }
 
         const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" }));
-        // Add performance.now() fractional part for sub-second precision if needed, 
-        // but toLocaleString is only 1s precise. 
-        // Better: Calculate offset once and use performance.now()
-        const nowMs = now.getTime();
-        const diff = targetMs - nowMs;
+        const diff = targetMs - now.getTime();
 
         // Precision Timing Checkpoints
         const checkpoints = [
@@ -247,15 +242,14 @@ function scheduleAutoClick() {
             if (diff > 0 && diff <= cp.time && !window[`fired_${cp.time}`]) {
                 window[`fired_${cp.time}`] = true;
                 cp.action();
-                logSolver(`[Auto] Firing Checkpoint: ${cp.label} (${cp.time/1000}s)`, "#3b82f6");
             }
         }
         
-        // Exact main hit - Use tighter threshold for "same ms" feel
-        if (diff <= 10 && diff > -60000) {
+        // Exact main hit
+        if (diff <= 300 && diff > -60000) {
             clearInterval(window.autoTimer);
             $("sendOtp").click();
-            logSolver(`[Auto] MAIN HIT FIRED at diff: ${diff}ms`, "#10b981");
+            logSolver(`[Auto] MAIN HIT FIRED (Diff: ${diff}ms)`, "#10b981");
             
             toggleInput.checked = false; 
             localStorage.setItem("autoTimeEnabled", "false");
@@ -265,20 +259,8 @@ function scheduleAutoClick() {
                 const uiCircle = uiToggle.querySelector("span");
                 if (uiCircle) uiCircle.style.left = "2px";
             }
-            return;
         }
-
-        // Adaptive Interval: Switch to 1ms when close to hit for ultra-precision
-        const nextInterval = (diff < 2000 && diff > 0) ? 1 : 100;
-        if (window.currentInterval !== nextInterval) {
-            window.currentInterval = nextInterval;
-            clearInterval(window.autoTimer);
-            window.autoTimer = setInterval(runLoop, nextInterval);
-        }
-    };
-
-    window.currentInterval = 100;
-    window.autoTimer = setInterval(runLoop, 100);
+    }, 10);
 }
 
 // SOCKET EVENTS

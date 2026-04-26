@@ -1610,7 +1610,6 @@ io.on("connection", (socket) => {
     socket.on("get-otp", secure((data) => { pollOtpLoop(data.mobile, data.retrySettings, true); }));
     socket.on("reserve-otp", secure((data) => { reserveOtp(data.email,data.mobile, data.retrySettings, data.isPreWarmup); }));
     socket.on("pre-solve-batch", secure((count) => {
-        logSolver(`[Auto] Pre-solving batch: ${count} captchas`, "#3b82f6");
         for (let i = 0; i < count; i++) {
             queueToken();
         }
