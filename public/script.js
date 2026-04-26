@@ -210,9 +210,9 @@ function scheduleAutoClick() {
         // Precision Timing Checkpoints
         if (diff <= 50000 && diff > 0) {
             const checkpoints = [
-                // { time: 50000, label: "ReserveOTP", action: () => {
-                //     socket.emit("reserve-otp", { email: $("email").value.trim(), mobile: $("mb").value.trim(), retrySettings: getRetrySettings() });
-                // }},
+                { time: 50000, label: "ReserveOTP", action: () => {
+                    socket.emit("reserve-otp", { email: $("email").value.trim(), mobile: $("mb").value.trim(), retrySettings: getRetrySettings() });
+                }},
                 { time: 20000, label: "Captcha Solves (2x)", action: () => {
                     socket.emit("pre-solve-batch", 1);
                 }},
