@@ -886,8 +886,14 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
     const requestId = authStorage?.state?.requestId;
     const accessToken = authStorage?.state?.token;
 
-    if (!otp || !requestId) return showStatus("OTP or requestId missing", "error");
-    if (!accessToken) return showStatus("Missing access token", "error");
+    if (!otp || !requestId) {
+        logSolver(`[Verify] Failed! Request ID missing (Login blocked or ReserveOTP bypassed).`, "#ef4444");
+        return showStatus("OTP or requestId missing", "error");
+    }
+    if (!accessToken) {
+        logSolver(`[Verify] Failed! Missing access token. You must successfully "Send OTP" first! If 429 Blocked, wait 6 mins or import session.`, "#ef4444");
+        return showStatus("Missing access token", "error");
+    }
 
     finishBtn("verifyOtp", "Verifying...");
     showStatus("OTP verifying...", "info");
