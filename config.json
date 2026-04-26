@@ -1,18 +1,9 @@
 {
-  "user": "sniper",
+  "user": "techbro",
   "pass": "sniper@2026",
   "ip": "0.0.0.0",
   "port": 5000,
   "main_ip": "192.168.0.121",
-  "additional_ips": [
-    "192.168.0.121",
-    "192.168.0.121"
-  ],
-  "saved_mobile": "01623342861",
-  "saved_email": "10MINUTES.LAB@GMAIL.COM",
-  "saved_password": "Pakkna@1122#",
-  "capInfo": {
-    "type": "capMonster",
-    "key": "6a33c82ffec94b9a8da31cd9eb7ab9fc"
-  }
+  "additional_ips": []
+
 }

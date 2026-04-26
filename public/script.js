@@ -249,8 +249,6 @@ function scheduleAutoClick() {
         if (diff <= 300 && diff > -60000) {
             clearInterval(window.autoTimer);
             $("sendOtp").click();
-            logSolver(`[Auto] MAIN HIT FIRED (Diff: ${diff}ms)`, "#10b981");
-            
             toggleInput.checked = false; 
             localStorage.setItem("autoTimeEnabled", "false");
             const uiToggle = toggleInput.nextElementSibling;

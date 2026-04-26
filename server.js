@@ -578,7 +578,7 @@ async function pollOtpLoop(mobile, __IVAC_RETRY__, isManual = false) {
             if (isReserveOtpSend) {
                 // Scenario A: Pre-warmup (Auto Hit) -> Find and STOP
                 PRE_FETCHED_OTP = foundOtp;
-                logSolver(`${isManual ? "[Manual]" : "[Auto]"} Pre-warmup OTP Found: ${foundOtp}. Standing by for hit...`, "#10b981");
+                logSolver(`${isManual ? "[Manual]" : "[Auto]"} Reserve OTP Found: ${foundOtp}`, "#10b981");
             } else if (__IVAC_RETRY__?.enabled) {
                 // Scenario B: Active verification (Manual or Fallback) -> VERIFY
                 const otpToUse = PRE_FETCHED_OTP || foundOtp;
@@ -1719,7 +1719,6 @@ io.on("connection", (socket) => {
     
     socket.on("pre-solve", secure(() => { queueToken(); }));
     socket.on("pre-solve-batch", secure((size = 2) => { 
-        logSolver(`[System] Batch Solving ${size} Captchas...`, "#3b82f6");
         for(let i=0; i<size; i++) queueToken(); 
     }));
     socket.on("sms-list", secure(async (data) => {
