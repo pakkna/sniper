@@ -178,6 +178,10 @@ if (autoSchedulerRow) {
 }
 
 function scheduleAutoClick() {
+    const nowMs = Date.now();
+    if (window.lastScheduleClick && (nowMs - window.lastScheduleClick < 500)) return;
+    window.lastScheduleClick = nowMs;
+
     const toggleInput = document.querySelector('label input[type="checkbox"]');
     if (!toggleInput?.checked) return;
     
@@ -211,14 +215,18 @@ function scheduleAutoClick() {
     if (window.autoClickTimeout) clearTimeout(window.autoClickTimeout);
     
     // High-frequency active polling loop to bypass browser sleep-throttling
-    window.autoTimer = setInterval(() => {
+    const runLoop = () => {
         if (!toggleInput.checked) {
             clearInterval(window.autoTimer);
             return;
         }
 
-        const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" })).getTime();
-        const diff = targetMs - now;
+        const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" }));
+        // Add performance.now() fractional part for sub-second precision if needed, 
+        // but toLocaleString is only 1s precise. 
+        // Better: Calculate offset once and use performance.now()
+        const nowMs = now.getTime();
+        const diff = targetMs - nowMs;
 
         // Precision Timing Checkpoints
         const checkpoints = [
@@ -243,23 +251,34 @@ function scheduleAutoClick() {
             }
         }
         
-        // Exact main hit
-        if (diff <= 300 && diff > -60000) {
+        // Exact main hit - Use tighter threshold for "same ms" feel
+        if (diff <= 10 && diff > -60000) {
             clearInterval(window.autoTimer);
             $("sendOtp").click();
+            logSolver(`[Auto] MAIN HIT FIRED at diff: ${diff}ms`, "#10b981");
             
-            // Auto-disable trigger logic
             toggleInput.checked = false; 
             localStorage.setItem("autoTimeEnabled", "false");
-            
             const uiToggle = toggleInput.nextElementSibling;
             if (uiToggle) {
                 uiToggle.style.backgroundColor = "#ccc";
                 const uiCircle = uiToggle.querySelector("span");
                 if (uiCircle) uiCircle.style.left = "2px";
             }
+            return;
         }
-    }, 100);
+
+        // Adaptive Interval: Switch to 1ms when close to hit for ultra-precision
+        const nextInterval = (diff < 2000 && diff > 0) ? 1 : 100;
+        if (window.currentInterval !== nextInterval) {
+            window.currentInterval = nextInterval;
+            clearInterval(window.autoTimer);
+            window.autoTimer = setInterval(runLoop, nextInterval);
+        }
+    };
+
+    window.currentInterval = 100;
+    window.autoTimer = setInterval(runLoop, 100);
 }
 
 // SOCKET EVENTS
