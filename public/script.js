@@ -210,18 +210,12 @@ function scheduleAutoClick() {
         // Precision Timing Checkpoints
         if (diff <= 50000 && diff > 0) {
             const checkpoints = [
-                { time: 50000, label: "ReserveOTP", action: () => {
-                    socket.emit("reserve-otp", { email: $("email").value.trim(), mobile: $("mb").value.trim(), retrySettings: getRetrySettings() });
+                // { time: 50000, label: "ReserveOTP", action: () => {
+                //     socket.emit("reserve-otp", { email: $("email").value.trim(), mobile: $("mb").value.trim(), retrySettings: getRetrySettings() });
+                // }},
+                { time: 20000, label: "Captcha Solves (2x)", action: () => {
+                    socket.emit("pre-solve-batch", 1);
                 }},
-                { time: 30000, label: "Captcha Solves (2x)", action: () => {
-                    socket.emit("pre-solve-batch", 2);
-                }},
-                { time: 10000, label: "Conn Warmup", action: () => {
-                    socket.emit("warm-up-workers", { 
-                        mobile: $("mb").value.trim(), 
-                        mbpassword: $("mbpass").value.trim() 
-                    });
-                }}
             ];
 
             for (const cp of checkpoints) {
@@ -589,6 +583,18 @@ if (btnSms) {
     };
 }
 
+const btnReserveOtpBtn = $("reserveOtpBtn");
+if (btnReserveOtpBtn) {
+    btnReserveOtpBtn.onclick = () => {
+        btnReserveOtpBtn.innerHTML = "<span class='spin'>⏳</span>...";
+        socket.emit("reserve-otp", {
+            mobile: $("mb").value.trim(),
+            email: $("email").value.trim(),
+            retrySettings: getRetrySettings()
+        });
+    };
+}
+
 const btnSend = $("sendOtp");
 if (btnSend) {
     btnSend.onclick = async () => {
@@ -596,6 +602,7 @@ if (btnSend) {
         updateStep("sendOtp", "active");
         socket.emit("send-otp", {
             mobile: $("mb").value.trim(),
+            email: $("email").value.trim(),
             mbpassword: $("mbpass").value.trim(),
             oldOtp: $("otp").value.trim(),
             retrySettings: getRetrySettings()

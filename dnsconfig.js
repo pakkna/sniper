@@ -5,7 +5,7 @@ import dns from 'node:dns';
 export const directApi = false; 
 
 export const dnsMap = {
-    "api.ivacbd.com": "3.108.183.28"
+    "api.ivacbd.com": "13.205.211.84"
 };
 
 export const customLookup = (hostname, options, callback) => {
