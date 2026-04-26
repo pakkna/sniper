@@ -167,9 +167,11 @@ if (autoSchedulerRow) {
         slider.style.backgroundColor = toggleInput.checked ? "#28a745" : "#475569";
         circle.style.left = toggleInput.checked ? (SLIDER_WIDTH - CIRCLE_SIZE - 2) + "px" : "2px";
         localStorage.setItem("autoClickTimeMs", JSON.stringify({ time: timeInput.value }));
-        if (window.autoClickTimeout) clearTimeout(window.autoClickTimeout);
-        if (window.reserveTimeout) clearTimeout(window.reserveTimeout);
-        if (toggleInput.checked) scheduleAutoClick();
+        if (toggleInput.checked) {
+            scheduleAutoClick();
+        } else {
+            window.lastScheduledTime = null;
+        }
     };
     wrapper.append(timeSection, toggleWrapper); autoSchedulerRow.appendChild(wrapper);
     if (toggleInput.checked) scheduleAutoClick();
@@ -187,13 +189,22 @@ function scheduleAutoClick() {
     const timeStr = timeValues.time || "17:00:00";
     let [hour, minute, second] = timeStr.split(":").map(Number);
     const bdNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" }));
-    const target = new Date(bdNow); target.setHours(hour, minute, second);
+    const target = new Date(bdNow); 
+    target.setHours(hour, minute, second, 0); 
     if (target <= bdNow) target.setDate(target.getDate() + 1);
     
     const targetMs = target.getTime();
     window.reserveOtpSent = false;
-    window.fired_50000 = false;
-    window.fired_20000 = false;
+    
+    // Dynamically clear all checkpoint flags
+    const checkpointTimes = [50000, 20000];
+    checkpointTimes.forEach(t => window[`fired_${t}`] = false);
+
+    const targetTimeLog = target.toLocaleTimeString("en-US", { timeZone: "Asia/Dhaka" });
+    if (window.lastScheduledTime !== targetTimeLog) {
+        logSolver(`[Auto] Scheduled for ${targetTimeLog}`, "#10b981");
+        window.lastScheduledTime = targetTimeLog;
+    }
     
     if (window.autoTimer) clearInterval(window.autoTimer);
     if (window.reserveTimeout) clearTimeout(window.reserveTimeout);
@@ -219,8 +230,8 @@ function scheduleAutoClick() {
                     isPreWarmup: true 
                 });
             }},
-            { time: 20000, label: "Captcha Solves (2x)", action: () => {
-                socket.emit("pre-solve-batch", 2);
+            { time: 20000, label: "Captcha Solves (1x)", action: () => {
+                socket.emit("pre-solve-batch", 1);
             }},
         ];
 
