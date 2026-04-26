@@ -2,11 +2,12 @@ import { spawn } from "child_process";
 import express from "express";
 import fs from "fs";
 import { gotScraping } from "got-scraping";
-import { createServer } from "http";
+import { createServer, Agent as HttpAgent } from "http";
+import { Agent as HttpsAgent } from "https";
 import path from "path";
 import { Server } from "socket.io";
 import { fileURLToPath } from "url";
-import { directApi, dnsMap } from "./dnsconfig.js";
+import { directApi, dnsMap, customLookup } from "./dnsconfig.js";
 import { encryptCaptchaToken } from "./tokenEncrypt.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -160,41 +161,36 @@ function getGotClient(taskName, workerId) {
     const netOpts = getNetworkOpts(effectiveWorkerId);
     
     if (!workerNetworkClients.has(key)) {
+        // High-precision adaptive agent logic
+        const isReservation = taskName && taskName.startsWith("ReserveSlot");
+        
+        // Use connection reuse (Keep-Alive/HTTP2) for everything EXCEPT 
+        // the DNS-mode reservation hit which needs per-request IP rotation.
+        const useHttp2 = directApi ? true : !isReservation;
+        const keepAlive = directApi ? true : !isReservation;
+        
+        const agentOpts = {
+            keepAlive,
+            maxSockets: Infinity,
+            timeout: 60000,
+            rejectUnauthorized: false,
+            lookup: customLookup
+        };
+
         const client = gotScraping.extend({
-            http2: true,
+            http2: useHttp2,
             throwHttpErrors: false,
             retry: { limit: 0 },
             timeout: { request: 120000 },
             proxyUrl: proxyUrl,
+            agent: {
+                http: new HttpAgent(agentOpts),
+                https: new HttpsAgent(agentOpts)
+            },
             hooks: {
                 beforeRequest: [
                     (options) => {
-                        // Selective DNS Overriding logic for HTTP/2 compatibility
-                        const path = options.url.pathname;
-                        const isReservation = path === '/iams/api/v1/slots/reserveSlot';
-                        const originalHost = "api.ivacbd.com";
-                        const fixedIpMap = dnsMap[originalHost];
-                        const currentWorkerId = options.context?.workerId || workerId || 1;
-                        const fixedIp = Array.isArray(fixedIpMap) ? fixedIpMap[(currentWorkerId - 1) % fixedIpMap.length] : fixedIpMap;
-
-                        if (!directApi && isReservation && fixedIp) {
-                            // 1. Swap hostname with fixed IP
-                            options.url.hostname = fixedIp;
-                            
-                            // 2. Explicitly set headers for both HTTP/1.1 and HTTP/2
-                            options.headers.host = originalHost;
-                            // Some HTTP/2 implementations require :authority to be set manually if hostname is an IP
-                            options.headers[':authority'] = originalHost;
-                            
-                            // 3. Ensure TLS SNI is set correctly
-                            options.https = options.https || {};
-                            options.https.serverName = originalHost;
-                            
-                            // Log the pinning for visibility
-                            const actualId = options.context?.workerId || workerId;
-                            const title = getNetworkTitle(actualId);
-                        }
-
+                        // DNS rotation is handled by the Agent's lookup property and keepAlive: false
                         const host = options.url.host;
                         if (tlsSessionCache.has(host)) {
                             options.https = options.https || {};
