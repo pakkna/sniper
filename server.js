@@ -157,7 +157,7 @@ function getGotClient(taskName, workerId) {
             http2: true,
             throwHttpErrors: false,
             retry: { limit: 0 },
-            timeout: 120000,
+            timeout: { request: 120000 },
             proxyUrl: proxyUrl,
             hooks: {
                 beforeRequest: [
