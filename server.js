@@ -636,8 +636,8 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
                 if (!__IVAC_RETRY__?.enabled) {
                     TaskManager.removeController(taskName, controller);
                     finishBtn("reserveOtp", "Reserve OTP");
-                    if (res.statusCode === 403) {
-                        logSolver(`${wTag} Reserve OTP Status [403]`, '#d55252');
+                    if (res.statusCode === 403 || res.statusCode >= 500) {
+                        logSolver(`${wTag} Reserve OTP Status [${res.statusCode}]`, '#d55252');
                     } else {
                         logSolver(`${wTag} Reserve OTP Status [${res.statusCode}]`, '#d55252', data);
                     }
@@ -652,10 +652,10 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
                     waitMs = 500 + Math.floor(Math.random() * 1000); 
                 }else if ([400, 401].includes(res.statusCode)) { waitMs = 1000; }
                 
-                if (res.statusCode === 403) {
-                    logSolver(`${wTag} ReserveOTP Status [403] -> Retry in ${waitMs}ms`, '#d55252');
+                if (res.statusCode === 403 || res.statusCode >= 500) {
+                    logSolver(`${wTag} ReserveOTP Status [${res.statusCode}]`, '#d55252');
                 } else {
-                    logSolver(`${wTag} ReserveOTP Status [${res.statusCode}] -> Retry in ${waitMs}ms`, '#d55252', data);
+                    logSolver(`${wTag} ReserveOTP Status [${res.statusCode}]`, '#d55252', data);
                 }
 
                 if ([403, 503, 429].includes(res.statusCode)) {
@@ -802,8 +802,8 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
                 if (!__IVAC_RETRY__?.enabled) {
                     TaskManager.removeController(taskName, controller);
                     finishBtn("sendOtp", "Send OTP", "none");
-                    if (response.statusCode === 403) {
-                        logSolver(`Send OTP [W${workerId}] Status [403]`, '#d55252');
+                    if (response.statusCode === 403 || response.statusCode >= 500) {
+                        logSolver(`Send OTP [W${workerId}] Status [${response.statusCode}]`, '#d55252');
                     } else {
                         logSolver(`Send OTP [W${workerId}] Status [${response.statusCode}]`, '#d55252', data);
                     }
@@ -849,10 +849,10 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
                     return;
                 }
 
-                if (response.statusCode === 403) {
-                    logSolver(`${wTag} Send OTP Status [403] -> Retry in ${waitMs}ms`, '#d55252');
+                if (response.statusCode === 403 || response.statusCode >= 500) {
+                    logSolver(`${wTag} Send OTP Status [${response.statusCode}]`, '#d55252');
                 } else {
-                    logSolver(`${wTag} Send OTP Status [${response.statusCode}] -> Retry in ${waitMs}ms`, '#d55252', data);
+                    logSolver(`${wTag} Send OTP Status [${response.statusCode}]`, '#d55252', data);
                 }
 
                 if ([403, 503].includes(response.statusCode)) {
@@ -977,7 +977,11 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
             if (res.statusCode !== 200 && res.statusCode !== 404) {
                 if (!__IVAC_RETRY__?.enabled) {
                     TaskManager.removeController("verifyOtp", controller);
-                    logSolver(`OTP Verify Status [${res.statusCode}]`, '#d55252', data);
+                    if (res.statusCode >= 500) {
+                        logSolver(`OTP Verify Status [${res.statusCode}]`, '#d55252');
+                    } else {
+                        logSolver(`OTP Verify Status [${res.statusCode}]`, '#d55252', data);
+                    }
                     return;
                 }
                 
@@ -992,7 +996,11 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
                     waitMs = 1000;
                 }
                 
-                logSolver(`OTP Verify Status [${res.statusCode}] -> Retry in ${waitMs}ms`, '#d55252', data);
+                if (res.statusCode >= 500) {
+                    logSolver(`OTP Verify Status [${res.statusCode}]`, '#d55252');
+                } else {
+                    logSolver(`OTP Verify Status [${res.statusCode}]`, '#d55252', data);
+                }
                 TaskManager.removeController("verifyOtp", controller);
                 onFail(waitMs);
                 return;
@@ -1221,8 +1229,8 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                  if (!__IVAC_RETRY__?.enabled) {
                      TaskManager.stopTask("reserveSlot");
                      finishBtn("reserveSlot", "Reserve Slot", "none");
-                     if (res.statusCode === 403) {
-                         logSolver(`ReserveSlot Status [403]`, '#d55252');
+                     if (res.statusCode === 403 || res.statusCode >= 500) {
+                         logSolver(`ReserveSlot Status [${res.statusCode}]`, '#d55252');
                      } else {
                          logSolver(`ReserveSlot Status [${res.statusCode}]`, '#d55252', data);
                      }
@@ -1240,6 +1248,8 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                      logSolver(`${wTag} Slot Status [ 403 ] -> Hard Resetting Session`, '#b057ff');
                      clearWorkerClient(`ReserveSlot-W${id}`, id);
                      clearTlsSession("api.ivacbd.com");
+                 } else if (res.statusCode >= 500) {
+                     logSolver(`${wTag} Slot Status [ ${res.statusCode} ]`, '#b057ff');
                  } else {
                      logSolver(`${wTag} Slot Status [ ${res.statusCode} ]`, '#b057ff', data);
                  }
