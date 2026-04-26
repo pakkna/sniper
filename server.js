@@ -7,7 +7,7 @@ import { Agent as HttpsAgent } from "https";
 import path from "path";
 import { Server } from "socket.io";
 import { fileURLToPath } from "url";
-import { directApi, dnsMap, customLookup } from "./dnsconfig.js";
+import { directApi, dnsMap } from "./dnsconfig.js";
 import { encryptCaptchaToken } from "./tokenEncrypt.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -164,17 +164,20 @@ function getGotClient(taskName, workerId) {
         // High-precision adaptive agent logic
         const isReservation = taskName && taskName.startsWith("ReserveSlot");
         
-        // Use connection reuse (Keep-Alive/HTTP2) for everything EXCEPT 
-        // the DNS-mode reservation hit which needs per-request IP rotation.
-        const useHttp2 = directApi ? true : !isReservation;
-        const keepAlive = directApi ? true : !isReservation;
+        // Settings for Reservation ONLY when directApi is false
+        // 1. Disable connection reuse to force IP rotation
+        // 2. Disable HTTP/2 to prevent coalescing
+        // 3. Use custom DNS lookup map
+        const useRotation = !directApi && isReservation;
+        
+        const useHttp2 = useRotation ? false : true;
+        const keepAlive = useRotation ? false : true;
         
         const agentOpts = {
             keepAlive,
-            maxSockets: Infinity,
-            timeout: 60000,
-            rejectUnauthorized: false,
-            lookup: customLookup
+            maxSockets: useRotation ? 1 : 5,
+            timeout: 90000,
+            rejectUnauthorized: false
         };
 
         const client = gotScraping.extend({
@@ -190,10 +193,27 @@ function getGotClient(taskName, workerId) {
             hooks: {
                 beforeRequest: [
                     (options) => {
-                        // DNS rotation is handled by the Agent's lookup property and keepAlive: false
-                        const host = options.url.host;
-                        if (tlsSessionCache.has(host)) {
-                            options.https = options.https || {};
+                        const host = options.url.host; // e.g. api.ivacbd.com
+                        const isReservation = taskName && taskName.startsWith("ReserveSlot");
+                        const useRotation = !directApi && isReservation;
+
+                        // STONGER ROTATION: Manual hostname override for deterministic IP targeting
+                        if (useRotation && dnsMap[host]) {
+                            const ips = dnsMap[host];
+                            const ip = Array.isArray(ips) ? ips[Math.floor(Math.random() * ips.length)] : ips;
+                            
+                            options.url.hostname = ip;
+                            options.headers.host = host;
+                            if (!options.https) options.https = {};
+                            options.https.servername = host; // Critical for SNI
+                            options.https.rejectUnauthorized = false;
+                        }
+
+                        // Ensure fresh handshakes for Reservation by skipping and clearing cache
+                        if (isReservation) {
+                            tlsSessionCache.delete(host);
+                        } else if (tlsSessionCache.has(host)) {
+                            if (!options.https) options.https = {};
                             options.https.tlsOptions = { ...options.https.tlsOptions, session: tlsSessionCache.get(host) };
                         }
                     }
@@ -201,7 +221,10 @@ function getGotClient(taskName, workerId) {
                 afterResponse: [
                     (response) => {
                         const host = response.request.options.url.host;
-                        if (response.request.socket && response.request.socket.getSession) {
+                        const isReservation = taskName && taskName.startsWith("ReserveSlot");
+
+                        // Skip caching for reservation to avoid polluting standard flow cache
+                        if (!isReservation && response.request.socket && response.request.socket.getSession) {
                             const session = response.request.socket.getSession();
                             if (session) tlsSessionCache.set(host, session);
                         }
