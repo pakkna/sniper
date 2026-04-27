@@ -696,9 +696,11 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
                     return showStatus(data?.message || data?.error || "Failed", "error");
                 }
                 let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
-                if (res.statusCode === 403 || res.statusCode === 503) {
+                if (res.statusCode === 403) {
                     waitMs = 2500 + Math.floor(Math.random() * 501); 
-                }else if (res.statusCode === 429) {
+                } else if (res.statusCode === 503) {
+                    waitMs = 800;
+                } else if (res.statusCode === 429) {
                     waitMs = 20000;
                 }else if ([500, 501, 502, 504, 520].includes(res.statusCode)) {
                     waitMs = 500 + Math.floor(Math.random() * 1000); 
@@ -853,8 +855,10 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
                 }
                 
                 let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
-                if (response.statusCode === 403 || response.statusCode === 503) {
+                if (response.statusCode === 403) {
                     waitMs = 2500 + Math.floor(Math.random() * 501);
+                } else if (response.statusCode === 503) {
+                    waitMs = 800;
                 } else if (response.statusCode === 429) {
                     waitMs = 20000; // 20s
                 } else if ([500, 501, 502, 504, 520].includes(response.statusCode)) {
@@ -1779,10 +1783,3 @@ const IP = panelConfig.ip || '0.0.0.0';
 server.listen(PORT, IP, () => {
     console.log(`🎯 IVAC High-Speed Engine running perfectly on http://${IP}:${PORT}`);
 });
-
-// Background Pool Refill Loop: Always keep 2 tokens ready in the pool
-setInterval(() => {
-    if (preSolvedTokens.length < 2 && solversInProgress === 0 && CapInfo?.key) {
-        queueToken();
-    }
-}, 3000);

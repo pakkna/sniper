@@ -166,7 +166,10 @@ if (autoSchedulerRow) {
     timeInput.type = "text";
     Object.assign(timeInput.style, { borderRadius: "4px", padding: "4px", fontSize: "14px", height: "auto", width: "80px", textAlign: "center", color: "#d2d2d2", border: "1px solid #727272", backgroundColor: "#000", margin: "0" });
     const savedTime = JSON.parse(localStorage.getItem("autoClickTimeMs") || "{}");
-    timeInput.value = savedTime.time || "17:00:00";
+    timeInput.value = savedTime.time || "16:59:57";
+    timeInput.placeholder = "HH:mm:ss.ms";
+    timeInput.title = "Target Hit Time (e.g. 16:59:57.500)";
+    timeInput.oninput = () => localStorage.setItem("autoClickTimeMs", JSON.stringify({ time: timeInput.value }));
     timeInput.onchange = () => localStorage.setItem("autoClickTimeMs", JSON.stringify({ time: timeInput.value }));
     
     timeSection.append(timeLabel, timeInput);
@@ -206,12 +209,12 @@ function scheduleAutoClick() {
     const toggleInput = document.querySelector('label input[type="checkbox"]');
     if (!toggleInput?.checked) return;
     
-    let timeValues = { time: "17:00:00" };
+    let timeValues = { time: "16:59:57" };
     try {
         const stored = localStorage.getItem("autoClickTimeMs");
         if (stored && stored !== 'undefined') timeValues = JSON.parse(stored);
     } catch(e) {}
-    const timeStr = timeValues.time || "17:00:00";
+    const timeStr = timeValues.time || "16:59:57";
     let [hour, minute, second] = timeStr.split(":").map(Number);
     const bdNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" }));
     const target = new Date(bdNow); 
@@ -643,7 +646,7 @@ if (btnReserveOtpBtn) {
         try {
             const stored = localStorage.getItem("autoClickTimeMs");
             if (stored && stored !== 'undefined') {
-                const timeStr = JSON.parse(stored).time || "17:00:00";
+                const timeStr = JSON.parse(stored).time || "16:59:57";
                 let [hour, minute, second] = timeStr.split(":").map(Number);
                 const bdNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" }));
                 const target = new Date(bdNow); target.setHours(hour, minute, second, 0);
