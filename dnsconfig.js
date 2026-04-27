@@ -2,7 +2,8 @@
 
 // Set to true to hit the main url with no specific ip.
 // If false, then the fixed ip from dnsMap is used.
-export const directApi = false; 
+export let directApi = false; 
+export const setDirectApi = (val) => { directApi = val; };
 
 export const dnsMap = {
     "api.ivacbd.com": [

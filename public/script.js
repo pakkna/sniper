@@ -128,6 +128,27 @@ setInterval(() => {
     $("bd-clock").innerText = new Date().toLocaleTimeString("en-US", { timeZone: "Asia/Dhaka", hour12: true });
 }, 1000);
 
+// DNS / DIRECT API SETTINGS
+const dnsSetting = $("DnsSetting");
+if (dnsSetting) {
+    dnsSetting.onclick = () => {
+        $("dnsModal").classList.remove("hidden");
+    };
+}
+const closeDnsBtn = $("closeDnsBtn");
+if (closeDnsBtn) {
+    closeDnsBtn.onclick = () => $("dnsModal").classList.add("hidden");
+}
+const dnsSave = $("dnsSave");
+if (dnsSave) {
+    dnsSave.onclick = () => {
+        const val = $("directApiSelect").value === "true";
+        socket.emit("update-direct-api", val);
+        $("dnsModal").classList.add("hidden");
+        showStatus(`Engine Updated: directApi = ${val}`, "success");
+    };
+}
+
 // AUTO SCHEDULER
 const autoSchedulerRow = $("autoSchedulerRow");
 if (autoSchedulerRow) {
@@ -307,6 +328,9 @@ socket.on("initial-config", (config) => {
     if (config.capInfo && config.capInfo.key) {
         CapInfo = config.capInfo;
         updateCaptchaTitle();
+    }
+    if (config.directApi !== undefined) {
+        $("directApiSelect").value = config.directApi.toString();
     }
 });
 

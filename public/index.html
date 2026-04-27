@@ -150,6 +150,7 @@
       <span>IVAC Sniper V2 Panel</span>
       <div style="display: flex; gap: 3px; align-items: center;">
         <div class="tabs" style="display: flex; gap: 5px;">
+          <div class="tab" id="DnsSetting" title="DNS & Direct API Settings" style="background:#0f172a; padding:5px; border-radius:4px; font-size:12px; cursor:pointer;" onmouseover="this.style.background='#1e293b'" onmouseout="this.style.background='#0f172a'">⚙️</div>
           <div class="tab" id="CapSetting" title="Captcha Settings">🛠️</div>
           <div class="tab" id="ProxySetting" title="Proxy Settings" style="background:#0f172a; padding:5px; border-radius:4px; font-size:12px; cursor:pointer;" onmouseover="this.style.background='#1e293b'" onmouseout="this.style.background='#0f172a'">🌐</div>
         </div>
@@ -330,6 +331,29 @@
     <div class="row" style="justify-content: flex-end; gap: 10px; margin-top: 15px;">
       <button id="capCancel" class="btn-verify" style="flex:unset;">Cancel</button>
       <button id="capSave" class="btn-save" style="flex:unset;">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="dnsModal" class="modal-overlay hidden">
+  <div class="modal-content" style="width: 320px;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #334155; padding-bottom: 8px;">
+        <h3 style="margin: 0; color: #fff; font-size: 15px;">⚙️ DNS Engine Settings</h3>
+        <span id="closeDnsBtn" style="cursor: pointer; color: #ef4444; font-weight: bold; font-size: 16px;">&times;</span>
+    </div>
+    <div class="col">
+      <label style="color: #94a3b8; font-size: 12px; margin-bottom: 5px; display: block;">DNS Map / Direct API:</label>
+      <select id="directApiSelect" style="background: #020617; color: #e5e7eb; border: 1px solid #334155; border-radius: 6px; padding: 10px; width: 100%; cursor: pointer;">
+        <option value="false">Enable (dnsMap Active)</option>
+        <option value="true">Disable (Direct API Mode)</option>
+      </select>
+      <p style="font-size: 11px; color: #64748b; margin-top: 8px; line-height: 1.4;">
+        * Enable = directApi: false (Uses fixed IPs from dnsMap)<br>
+        * Disable = directApi: true (Direct hostname connection)
+      </p>
+    </div>
+    <div class="row" style="justify-content: flex-end; gap: 10px; margin-top: 15px;">
+      <button id="dnsSave" class="btn-save" style="flex:1; padding: 10px;">Update Engine</button>
     </div>
   </div>
 </div>

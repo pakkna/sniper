@@ -7,7 +7,7 @@ import { Agent as HttpsAgent } from "https";
 import path from "path";
 import { Server } from "socket.io";
 import { fileURLToPath } from "url";
-import { directApi, dnsMap } from "./dnsconfig.js";
+import { directApi, dnsMap, setDirectApi } from "./dnsconfig.js";
 import { encryptCaptchaToken } from "./tokenEncrypt.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -170,13 +170,13 @@ function getGotClient(taskName, workerId) {
         // 3. Use custom DNS lookup map
         const useRotation = !directApi && isReservation;
         
-        const useHttp2 = useRotation ? false : true;
-        const keepAlive = useRotation ? false : true;
+        const useHttp2 =useRotation ? false : true;
+        const keepAlive =useRotation ? false : true;
         
         const agentOpts = {
             keepAlive,
-            maxSockets: useRotation ? 1 : 5,
-            timeout: 90000,
+            maxSockets: useRotation ? 3 : 10,
+            timeout: 60000,
             rejectUnauthorized: false
         };
 
@@ -385,13 +385,21 @@ async function startWorkerCapMonoster(id, signal) {
         const { taskId, errorId, errorDescription } = create.body;
         if (errorId !== 0) throw new Error(errorDescription || "Create Task Failed");
         
+
+        let pollCount = 0;
+        const POLL_LIMIT = 10;
+
         while (!signal?.aborted) {
-            await new Promise(r => setTimeout(r, 800));
+            pollCount++;
+            if (pollCount > POLL_LIMIT) throw new Error(`Polling limit reached (${POLL_LIMIT}). Aborting task.`);
+
+            await new Promise(r => setTimeout(r, 1000));
             if (signal?.aborted) return null;
             
             const check = await gotScraping.post(`${API}/getTaskResult`, {
                 json: { clientKey: CapInfo.key, taskId },
-                responseType: "json", signal
+                responseType: "json", signal,
+                timeout: { request: 30000 }
             });
             const result = check.body;
             
@@ -423,13 +431,21 @@ async function startWorkerCapSolver(id, signal) {
         if (createData.errorId !== 0) throw new Error(createData.errorDescription || "Create Task Failed");
         
         const taskId = createData.taskId;
+
+        let pollCount = 0;
+        const POLL_LIMIT = 8; 
+
         while (!signal?.aborted) {
-            await new Promise(r => setTimeout(r, 800));
+            pollCount++;
+            if (pollCount > POLL_LIMIT) throw new Error(`Polling limit reached (${POLL_LIMIT}). Aborting task.`);
+
+            await new Promise(r => setTimeout(r, 1200));
             if (signal?.aborted) return null;
             
             const check = await gotScraping.post(`${API}/getTaskResult`, {
                 json: { clientKey: CapInfo.key, taskId },
-                responseType: "json", signal
+                responseType: "json", signal,
+                timeout: { request: 30000 }
             });
             const result = check.body;
             
@@ -470,23 +486,7 @@ async function solveAggressive() {
         }
     }
 
-    // 2. If already solving, wait for it
-    if (solversInProgress > 0) {
-        while (solversInProgress > 0) {
-            await new Promise(r => setTimeout(r, 500));
-            // After wait, check pool again
-            while (preSolvedTokens.length > 0) {
-                const item = preSolvedTokens.shift();
-                if (Date.now() - item.time <= 80000) {
-                    UI_SOCKET?.emit("btn-reset", { id: "solver", text: preSolvedTokens.length > 0 ? `🧩 Solver (${preSolvedTokens.length})` : "🧩 Solver" });
-                    return item.token;
-                }
-            }
-        }
-        // If solvers finished but pool still empty, start our own
-        return solveAggressive(); 
-    }
-
+    // 2. No more restriction - allow parallel solvers to start whenever pool is empty
     return await __solveAggressive();
 }
 
@@ -503,6 +503,12 @@ async function __solveAggressive() {
     const controller = TaskManager.start(taskName);
     const { signal } = controller;
     
+    // Safety timeout: Abort if not solved in 90s
+    const safetyTimeout = setTimeout(() => {
+        controller.abort();
+        logSolver("⚠️ API Captcha Solver Timeout!", "#ef4444");
+    }, 90000);
+
     let workerPromises = [];
     if (CapInfo.type === "capSolver") {
         workerPromises.push(startWorkerCapSolver(1, signal));
@@ -513,13 +519,14 @@ async function __solveAggressive() {
     try {
         const token = await Promise.any(workerPromises.filter(p => p !== null));
         if (token && !signal.aborted) {
-            TaskManager.removeController(taskName, controller);
             logSolver(`🧩 API Token Solved.`, "#10b981");
             return token;
         }
     } catch (e) {
         if (!signal.aborted) logSolver(`⚠️ API Captcha Solve Failed`, "#ef4444");
     } finally {
+        clearTimeout(safetyTimeout);
+        controller.abort(); // Ensure everything is stopped
         solversInProgress--;
         TaskManager.removeController(taskName, controller);
     }
@@ -602,7 +609,7 @@ async function pollOtpLoop(mobile, __IVAC_RETRY__, isManual = false) {
                 // Scenario B: Active verification (Manual or Fallback) -> VERIFY
                 const otpToUse = PRE_FETCHED_OTP || foundOtp;
                 PRE_FETCHED_OTP = null;
-                logSolver(`[Verify] OTP Found: ${otpToUse}. Starting verification...`, "#10b981");
+                logSolver(`OTP Found: ${otpToUse}.try to verify`, "#b057ff");
                 verifyOtpAggressive(mobile, otpToUse, __IVAC_RETRY__);
             } else {
                 PRE_FETCHED_OTP = foundOtp;
@@ -677,9 +684,6 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
             }
 
             if (res.statusCode !== 200) {
-                if (![403, 503, 429].includes(res.statusCode)) {
-                    captchaToken = null;
-                }
                 
                 if (!__IVAC_RETRY__?.enabled) {
                     TaskManager.removeController(taskName, controller);
@@ -706,7 +710,7 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
                     logSolver(`${wTag} ReserveOTP Status [${res.statusCode}]`, '#d55252', data);
                 }
 
-                if ([403, 503, 429].includes(res.statusCode)) {
+                if ([403, 503].includes(res.statusCode)) {
                     return TaskManager.setTimeout(taskName, () => trySend(workerId, tokenToUse), waitMs);
                 } else {
                     return TaskManager.setTimeout(taskName, () => trySend(workerId), waitMs);
@@ -717,7 +721,6 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
             TaskManager.removeController(taskName, controller);
         } catch (err) {
             if (err.name !== "AbortError" && __IVAC_RETRY__?.enabled) {
-                captchaToken = null;
                 logSolver(`${wTag} Send OTP Cross Error: ${err.message}`, '#d55252');
                 return TaskManager.setTimeout(taskName, () => trySend(workerId), 1000);
             }
@@ -754,18 +757,21 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
     }
 
     sendOtpWorkerCount++;
-    const workerId = sendOtpWorkerCount;
-    const taskName = `sendOtp-${workerId}`;
-    const controller = TaskManager.start(taskName);
-
+    const taskName = `sendOtp`;
+    
     if (!mobile || !mbpassword) {
-        TaskManager.stopTask(taskName);
         return showStatus("Phone & Password required", "error");
     }
 
-    const trySend = async (workerId, oldTokenToUse = null) => {
-        if (controller.signal.aborted) return;
-        const wTag = `[W-${workerId}|${getNetworkTitle(workerId)}]`;
+    let successTriggered = false;
+    let activeCount = 0;
+
+    const trySend = async (id, delay = 0, oldTokenToUse = null) => {
+        const controller = TaskManager.start(taskName);
+        if (delay) await new Promise(r => TaskManager.setTimeout(taskName, r, delay));
+        if (successTriggered || controller.signal.aborted) return;
+
+        const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
         logSolver(`${wTag} SendOTP Started`, "#3b82f6");
         try {
             let tokenToUse;
@@ -778,22 +784,20 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
 
             const payload = { captchaToken: tokenToUse, phone: mobile, password: mbpassword };
 
-            const response = await getGotClient(`SendOTP-W${workerId}`, workerId).post(`${RootUrl}/iams/api/v1/auth/signin`, {
+            const response = await getGotClient(`SendOTP-W${id}`, id).post(`${RootUrl}/iams/api/v1/auth/signin`, {
                 json: payload, responseType: "json", signal: controller.signal,
                 headers: { "accept": "application/json, text/plain, */*", "cache-control": "no-cache, no-store, must-revalidate" }
             });
 
             const data = response.body;
 
-            const wTag = `[W-${workerId}|${getNetworkTitle(workerId)}]`;
-
             if (response.statusCode === 200 && data?.successFlag) {
+                successTriggered = true;
                 TaskManager.stopTask(taskName);
                 finishBtn("sendOtp", "Send OTP", "done");
                 showStatus(`OTP Send Successfully`, "success");
                 logSolver(`${wTag} OTP Send Successfully`, '#16a34a', data);
 
-                sendOtpWorkerCount = 0;
                 isReserveStarted = false;
                 isOtpVerifyAggressive = false;
                 globalOtpVerified = false;
@@ -837,16 +841,13 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
             }
 
             if (response.statusCode !== 200) {
-                if (![403, 503, 429].includes(response.statusCode)) {
-                    captchaToken = null;
-                }
                 if (!__IVAC_RETRY__?.enabled) {
                     TaskManager.removeController(taskName, controller);
                     finishBtn("sendOtp", "Send OTP", "none");
                     if (response.statusCode === 403 || response.statusCode === 502 || response.statusCode === 504) {
-                        logSolver(`Send OTP [W${workerId}] Status [${response.statusCode}]`, '#d55252');
+                        logSolver(`Send OTP [W${id}] Status [${response.statusCode}]`, '#d55252');
                     } else {
-                        logSolver(`Send OTP [W${workerId}] Status [${response.statusCode}]`, '#d55252', data);
+                        logSolver(`Send OTP [W${id}] Status [${response.statusCode}]`, '#d55252', data);
                     }
                     return showStatus(data?.message || data?.error || "Invalid credentials", "error");
                 }
@@ -904,9 +905,9 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
                 }
 
                 if ([403, 503].includes(response.statusCode)) {
-                    return TaskManager.setTimeout(taskName, () => trySend(workerId, tokenToUse), waitMs);
+                    return TaskManager.setTimeout(taskName, () => trySend(id, 0, tokenToUse), waitMs);
                 } else {
-                    return TaskManager.setTimeout(taskName, () => trySend(workerId), waitMs);
+                    return TaskManager.setTimeout(taskName, () => trySend(id), waitMs);
                 }
             }
 
@@ -914,31 +915,39 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
             TaskManager.removeController(taskName, controller);
         } catch (err) {
             if (err.name !== "AbortError" && __IVAC_RETRY__?.enabled) {
-                captchaToken = null;
                 logSolver(`${wTag} Send OTP Cross Error: ${err.message}`, '#d55252');
-                return TaskManager.setTimeout(taskName, () => trySend(workerId), 1000);
+                return TaskManager.setTimeout(taskName, () => trySend(id), 1000);
             }
             TaskManager.removeController(taskName, controller);
             finishBtn("sendOtp", "Send OTP", "none");
         }
     };
 
-    const numWorkers = 1; //__IVAC_RETRY__?.mode ? 3 : 1;
+    let numWorkers = 1;
+    // if (__IVAC_RETRY__?.mode > 1) {
+    //     numWorkers = parseInt(__IVAC_RETRY__.mode, 10) || 3;
+    // }
+    activeCount = numWorkers;
+
     for (let i = 1; i <= numWorkers; i++) {
-        trySend(i);
+        //let delay = (i === 1) ? 100 : ((i - 1) * 600 + Math.floor(Math.random() * 151));
+        trySend(i, 0);
     }
 }
 
 async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false) {
-    // logSolver(`Verify OTP Setup Initialized...`, '#3b82f6');
     const requestId = authStorage?.state?.requestId;
     const accessToken = authStorage?.state?.token;
 
     if (!otp || !requestId) {
-        logSolver(`[Verify] Failed! Request ID missing (Login blocked or ReserveOTP bypassed).`, "#ef4444");
+        TaskManager.stopTask("verifyOtp");
+        finishBtn("verifyOtp", "Verify OTP", "none");
+        logSolver(`[Verify] Failed! Request ID not found.`, "#ef4444");
         return showStatus("OTP or requestId missing", "error");
     }
     if (!accessToken) {
+        TaskManager.stopTask("verifyOtp");
+        finishBtn("verifyOtp", "Verify OTP", "none");
         logSolver(`[Verify] Failed! access token not found.`, "#ef4444");
         return showStatus("Missing access token", "error");
     }
@@ -1586,7 +1595,8 @@ io.on("connection", (socket) => {
                 mobile: panelConfig.saved_mobile || "",
                 email: panelConfig.saved_email || "",
                 password: panelConfig.saved_password || "",
-                capInfo: panelConfig.capInfo || { type: null, key: null }
+                capInfo: panelConfig.capInfo || { type: null, key: null },
+                directApi: directApi
             });
         } else {
             cb({ success: false });
@@ -1601,7 +1611,8 @@ io.on("connection", (socket) => {
                 mobile: panelConfig.saved_mobile || "",
                 email: panelConfig.saved_email || "",
                 password: panelConfig.saved_password || "",
-                capInfo: panelConfig.capInfo || { type: null, key: null }
+                capInfo: panelConfig.capInfo || { type: null, key: null },
+                directApi: directApi
             });
         } else {
             cb(false);
@@ -1641,6 +1652,12 @@ io.on("connection", (socket) => {
         panelConfig.capInfo = data;
         fs.writeFileSync(path.join(__dirname, "config.json"), JSON.stringify(panelConfig, null, 2));
         logSolver("Server received new Captcha Settings.", "#10b981"); 
+    }));
+
+    socket.on("update-direct-api", secure((val) => {
+        setDirectApi(val);
+        const activeDns = directApi ? "Direct Router API" : (dnsMap["api.ivacbd.com"] || "Default API");
+        logSolver(`🌐 Reservation DNS IP: ${activeDns}`, "#10b981");
     }));
     socket.on("proxy-state", secure((state) => { 
         currentProxyState = state; 
@@ -1762,3 +1779,10 @@ const IP = panelConfig.ip || '0.0.0.0';
 server.listen(PORT, IP, () => {
     console.log(`🎯 IVAC High-Speed Engine running perfectly on http://${IP}:${PORT}`);
 });
+
+// Background Pool Refill Loop: Always keep 2 tokens ready in the pool
+setInterval(() => {
+    if (preSolvedTokens.length < 2 && solversInProgress === 0 && CapInfo?.key) {
+        queueToken();
+    }
+}, 3000);
