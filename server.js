@@ -387,7 +387,7 @@ async function startWorkerCapMonoster(id, signal) {
         
 
         let pollCount = 0;
-        const POLL_LIMIT = 10;
+        const POLL_LIMIT = 20;
 
         while (!signal?.aborted) {
             pollCount++;
