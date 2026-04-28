@@ -140,15 +140,15 @@ function getGotClient(taskName, workerId) {
     let effectiveWorkerId = workerId;
 
     if (directApi) {
-        // Mode A: Direct API Enabled - Total Shared Connection
-        key = `direct-shared-${activeMode}`;
-        effectiveWorkerId = 1; // All workers share the same single client instance
+        // Mode A: Direct API - Unified Global Connection
+        key = `direct-${activeMode}`;
+        effectiveWorkerId = 1;
     } else if (isReservation) {
-        // Mode B: DNS Mode - Worker Specific IP Locking
-        key = `worker-locked-${activeMode}-${workerId}`;
+        // Mode B: DNS Mode - Worker-Locked IP
+        key = `res-${activeMode}-${workerId}`;
     } else {
-        // Standard shared flow for Auth/Payment in DNS mode
-        key = `standard-shared-${activeMode}`;
+        // Standard flow
+        key = `std-${activeMode}`;
         effectiveWorkerId = 1;
     }
 
@@ -156,10 +156,9 @@ function getGotClient(taskName, workerId) {
     const netOpts = getNetworkOpts(effectiveWorkerId);
     
     if (!workerNetworkClients.has(key)) {
-        // Adaptive Agent - Always Keep-Alive and HTTP/2 for performance
         const agentOpts = {
             keepAlive: true,
-            maxSockets: 20,
+            maxSockets: 25,
             timeout: 60000,
             rejectUnauthorized: false
         };
@@ -177,12 +176,10 @@ function getGotClient(taskName, workerId) {
             hooks: {
                 beforeRequest: [
                     (options) => {
-                        const host = options.url.host; // e.g. api.ivacbd.com
+                        const host = options.url.host;
                         
-                        // Mode B: IP Locking for Reservation
                         if (!directApi && isReservation && dnsMap[host]) {
                             const ips = dnsMap[host];
-                            // Deterministic IP selection: Worker 1 -> IP 0, Worker 2 -> IP 1, etc.
                             const ip = Array.isArray(ips) ? ips[(workerId - 1) % ips.length] : ips;
                             
                             options.url.hostname = ip;
@@ -192,7 +189,6 @@ function getGotClient(taskName, workerId) {
                             options.https.rejectUnauthorized = false;
                         }
 
-                        // Persistent Session Cache
                         if (tlsSessionCache.has(host)) {
                             if (!options.https) options.https = {};
                             options.https.tlsOptions = { ...options.https.tlsOptions, session: tlsSessionCache.get(host) };
@@ -212,7 +208,6 @@ function getGotClient(taskName, workerId) {
                 beforeError: [
                     (error) => {
                         const host = error.options?.url?.host;
-                        // Only clear session on fatal connection errors, not on 502/504
                         if (host && (error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT')) {
                             tlsSessionCache.delete(host);
                         }
@@ -230,21 +225,14 @@ function getGotClient(taskName, workerId) {
 function clearWorkerClient(taskName, workerId) {
     const activeMode = currentProxyState?.activeMode || 'native';
     const isReservation = taskName && taskName.startsWith("ReserveSlot");
-    const originalHost = "api.ivacbd.com";
-    const fixedIpMap = dnsMap[originalHost];
-    const isMultiFixedIp = Array.isArray(fixedIpMap) && fixedIpMap.length > 1;
-    
-    const allIps = [panelConfig.main_ip, ...(panelConfig.additional_ips || [])];
-    const isMultiIp = (activeMode === 'private' && allIps.length > 1);
-    const isRandom = (activeMode === 'random');
-
     let key;
-    if (isRandom || isMultiIp || (isReservation && isMultiFixedIp)) {
-        const pUrl = getProxyUrl(taskName, workerId, true);
-        key = `${activeMode}-${workerId}-${pUrl || 'none'}`;
+
+    if (directApi) {
+        key = `direct-${activeMode}`;
+    } else if (isReservation) {
+        key = `res-${activeMode}-${workerId}`;
     } else {
-        const pUrl = getProxyUrl(taskName, null, true);
-        key = `${activeMode}-shared-${pUrl || 'none'}`;
+        key = `std-${activeMode}`;
     }
 
     if (workerNetworkClients.has(key)) {
