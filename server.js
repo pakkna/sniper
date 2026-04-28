@@ -134,54 +134,38 @@ const tlsSessionCache = new Map();
 
 function getGotClient(taskName, workerId) {
     const activeMode = currentProxyState?.activeMode || 'native';
-    const allIps = [panelConfig.main_ip, ...(panelConfig.additional_ips || [])];
-    const isMultiIp = (activeMode === 'private' && allIps.length > 1);
-    const isRandom = (activeMode === 'random');
-
+    const isReservation = taskName && taskName.startsWith("ReserveSlot");
+    
     let key;
     let effectiveWorkerId = workerId;
 
-    const isReservation = taskName && taskName.startsWith("ReserveSlot");
-    const originalHost = "api.ivacbd.com";
-    const fixedIpMap = dnsMap[originalHost];
-    const isMultiFixedIp = Array.isArray(fixedIpMap) && fixedIpMap.length > 1;
-
-    if (isRandom || isMultiIp || (isReservation && isMultiFixedIp)) {
-        // Isolated Instance per worker (Random, Multi-IP, or Reservation with Multi-FixedIp)
-        const pUrl = getProxyUrl(taskName, workerId, true);
-        key = `${activeMode}-${workerId}-${pUrl || 'none'}`;
+    if (directApi) {
+        // Mode A: Direct API Enabled - Total Shared Connection
+        key = `direct-shared-${activeMode}`;
+        effectiveWorkerId = 1; // All workers share the same single client instance
+    } else if (isReservation) {
+        // Mode B: DNS Mode - Worker Specific IP Locking
+        key = `worker-locked-${activeMode}-${workerId}`;
     } else {
-        // Unified Shared Instance (Native, Specific Proxy, or Single-IP Private)
-        const pUrl = getProxyUrl(taskName, null, true);
-        key = `${activeMode}-shared-${pUrl || 'none'}`;
-        effectiveWorkerId = 1; 
+        // Standard shared flow for Auth/Payment in DNS mode
+        key = `standard-shared-${activeMode}`;
+        effectiveWorkerId = 1;
     }
 
     const proxyUrl = getProxyUrl(taskName, effectiveWorkerId, true);
     const netOpts = getNetworkOpts(effectiveWorkerId);
     
     if (!workerNetworkClients.has(key)) {
-        // High-precision adaptive agent logic
-        const isReservation = taskName && taskName.startsWith("ReserveSlot");
-        
-        // Settings for Reservation ONLY when directApi is false
-        // 1. Disable connection reuse to force IP rotation
-        // 2. Disable HTTP/2 to prevent coalescing
-        // 3. Use custom DNS lookup map
-        const useRotation = !directApi && isReservation;
-        
-        const useHttp2 =useRotation ? false : true;
-        const keepAlive =useRotation ? false : true;
-        
+        // Adaptive Agent - Always Keep-Alive and HTTP/2 for performance
         const agentOpts = {
-            keepAlive,
-            maxSockets: useRotation ? 3 : 10,
+            keepAlive: true,
+            maxSockets: 20,
             timeout: 60000,
             rejectUnauthorized: false
         };
 
         const client = gotScraping.extend({
-            http2: useHttp2,
+            http2: true,
             throwHttpErrors: false,
             retry: { limit: 0 },
             timeout: { request: 120000 },
@@ -194,25 +178,22 @@ function getGotClient(taskName, workerId) {
                 beforeRequest: [
                     (options) => {
                         const host = options.url.host; // e.g. api.ivacbd.com
-                        const isReservation = taskName && taskName.startsWith("ReserveSlot");
-                        const useRotation = !directApi && isReservation;
-
-                        // STONGER ROTATION: Manual hostname override for deterministic IP targeting
-                        if (useRotation && dnsMap[host]) {
+                        
+                        // Mode B: IP Locking for Reservation
+                        if (!directApi && isReservation && dnsMap[host]) {
                             const ips = dnsMap[host];
-                            const ip = Array.isArray(ips) ? ips[Math.floor(Math.random() * ips.length)] : ips;
+                            // Deterministic IP selection: Worker 1 -> IP 0, Worker 2 -> IP 1, etc.
+                            const ip = Array.isArray(ips) ? ips[(workerId - 1) % ips.length] : ips;
                             
                             options.url.hostname = ip;
                             options.headers.host = host;
                             if (!options.https) options.https = {};
-                            options.https.servername = host; // Critical for SNI
+                            options.https.servername = host; 
                             options.https.rejectUnauthorized = false;
                         }
 
-                        // Ensure fresh handshakes for Reservation by skipping and clearing cache
-                        if (isReservation) {
-                            tlsSessionCache.delete(host);
-                        } else if (tlsSessionCache.has(host)) {
+                        // Persistent Session Cache
+                        if (tlsSessionCache.has(host)) {
                             if (!options.https) options.https = {};
                             options.https.tlsOptions = { ...options.https.tlsOptions, session: tlsSessionCache.get(host) };
                         }
@@ -221,10 +202,7 @@ function getGotClient(taskName, workerId) {
                 afterResponse: [
                     (response) => {
                         const host = response.request.options.url.host;
-                        const isReservation = taskName && taskName.startsWith("ReserveSlot");
-
-                        // Skip caching for reservation to avoid polluting standard flow cache
-                        if (!isReservation && response.request.socket && response.request.socket.getSession) {
+                        if (response.request.socket && response.request.socket.getSession) {
                             const session = response.request.socket.getSession();
                             if (session) tlsSessionCache.set(host, session);
                         }
@@ -234,8 +212,8 @@ function getGotClient(taskName, workerId) {
                 beforeError: [
                     (error) => {
                         const host = error.options?.url?.host;
-                        if (host && tlsSessionCache.has(host)) {
-                            // If a connection error occurs, clear the session to ensure a fresh handshake next time
+                        // Only clear session on fatal connection errors, not on 502/504
+                        if (host && (error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT')) {
                             tlsSessionCache.delete(host);
                         }
                         return error;
@@ -1327,6 +1305,7 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
             let newToken = await solveAggressive();
             if (newToken) { 
                 recapToken = encryptCaptchaToken(newToken);
+                worker.tokenTimestamp = Date.now();
                 logSolver(`${wTag} ReserveSlot Started`, "#3b82f6");
             } else { finishBtn("reserveSlot", "Reserve Slot", "none"); return showStatus("Auto captcha solve failed!", "error"); }
         }
@@ -1395,7 +1374,11 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                  let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
                  if (res.statusCode === 403 || res.statusCode === 503) waitMs = 2500 + Math.floor(Math.random() * 501); // 2.5s-3s
                  else if (res.statusCode === 429) waitMs = 20000; // 20s
-                 else if ([500, 501, 502, 504, 520, 401].includes(res.statusCode)) waitMs = 800 + Math.floor(Math.random() * 401); // 800ms-1200ms
+                 else if ([500, 501, 520, 401].includes(res.statusCode)) waitMs = 800 + Math.floor(Math.random() * 401); // 800ms-1200ms
+                 else if (res.statusCode === 502 || res.statusCode === 504) {
+                     // Cool-Down Retry for 502/504
+                     waitMs = 800 + Math.floor(Math.random() * 701); // 800ms - 1500ms
+                 }
                  else if ([400].includes(res.statusCode)) waitMs = 1000;
 
                  if (res.statusCode === 403) {
@@ -1403,13 +1386,25 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                      clearWorkerClient(`ReserveSlot-W${id}`, id);
                      clearTlsSession("api.ivacbd.com");
                  } else if (res.statusCode === 502 || res.statusCode === 504) {
-                     logSolver(`${wTag} Slot Status [ ${res.statusCode} ]`, '#b057ff');
+                     logSolver(`${wTag} Slot Status [ ${res.statusCode} ] -> Cool-Down Retry`, '#b057ff');
                  } else {
                      logSolver(`${wTag} Slot Status [ ${res.statusCode} ]`, '#b057ff', data);
                  }
 
                  TaskManager.removeController("reserveSlot", controller);
                  
+                 if ([502, 504].includes(res.statusCode)) {
+                      // Smart Token Life Management for 502/504
+                      const tokenAge = Date.now() - worker.tokenTimestamp;
+                      if (tokenAge < 3000 && tokenAge < 70000) {
+                           logSolver(`${wTag} Reusing token (Age: ${(tokenAge/1000).toFixed(1)}s) in ${(waitMs/1000).toFixed(2)}s`);
+                           return onFail(waitMs, recapToken);
+                      } else {
+                           logSolver(`${wTag} Requesting fresh token in ${(waitMs/1000).toFixed(2)}s`);
+                           return onFail(waitMs, null);
+                      }
+                 }
+
                  if ([403, 503, 429].includes(res.statusCode)) {
                       logSolver(`${wTag} Next Hit ${(waitMs/1000).toFixed(2)}s`);
                       return onFail(waitMs, null);
@@ -1419,6 +1414,7 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                   logSolver(`${wTag} Next Hit ${(waitMs/1000).toFixed(2)}s`);
                   return onFail(waitMs, null);
             }
+
 
         } catch (e) {
             if (e.name === "AbortError") return;
