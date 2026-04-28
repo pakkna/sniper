@@ -1363,8 +1363,10 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                          TaskManager.stopAll();
                          logSolver(`ReserveSlot 401 Expired (After 5:10 PM). Auto Re-login...`, '#dc2626');
                          showStatus("Session Expired, auto re-login...", "error");
-                         if (authStorage.state.phone && authStorage.state.password) {
-                             sendOtp(authStorage.state.phone, authStorage.state.password, __IVAC_RETRY__);
+                         if (panelConfig.saved_mobile && panelConfig.saved_password) {
+                             workerNetworkClients.clear();
+                             tlsSessionCache.clear();
+                             sendOtp(panelConfig.saved_email || null, panelConfig.saved_mobile, panelConfig.saved_password, __IVAC_RETRY__);
                          }
                          return;
                      } else {
