@@ -370,91 +370,91 @@ const SITE_URL = "https://appointment.ivacbd.com";
 
 async function startWorkerCapMonoster(id, signal) {
     const API = "https://api.capmonster.cloud";
-    try {
-        if (signal?.aborted) return null;
-        // logSolver(`[Worker #${id}] CapMonster Task Started`, "#f59e0b");
-        
-        const create = await gotScraping.post(`${API}/createTask`, {
-            json: {
-                clientKey: CapInfo.key,
-                task: { type: "TurnstileTaskProxyless", websiteURL: SITE_URL, websiteKey: TRANSIT_SITE_KEY }
-            },
-            responseType: "json", signal
-        });
-        
-        const { taskId, errorId, errorDescription } = create.body;
-        if (errorId !== 0) throw new Error(errorDescription || "Create Task Failed");
-        
-
-        let pollCount = 0;
-        const POLL_LIMIT = 20;
-
-        while (!signal?.aborted) {
-            pollCount++;
-            if (pollCount > POLL_LIMIT) throw new Error(`Polling limit reached (${POLL_LIMIT}). Aborting task.`);
-
-            await new Promise(r => setTimeout(r, 1000));
+    let attempts = 0;
+    while (!signal?.aborted && attempts < 3) {
+        attempts++;
+        try {
             if (signal?.aborted) return null;
-            
-            const check = await gotScraping.post(`${API}/getTaskResult`, {
-                json: { clientKey: CapInfo.key, taskId },
-                responseType: "json", signal,
-                timeout: { request: 30000 }
+            const create = await gotScraping.post(`${API}/createTask`, {
+                json: {
+                    clientKey: CapInfo.key,
+                    task: { type: "TurnstileTaskProxyless", websiteURL: SITE_URL, websiteKey: TRANSIT_SITE_KEY }
+                },
+                responseType: "json", signal
             });
-            const result = check.body;
-            
-            if (result.errorId && result.errorId !== 0) throw new Error(result.errorDescription || "Task failed");
-            if (result.status === "ready" && result.solution?.token) return result.solution.token;
-            if (result.status === "failed") throw new Error("Task failed");
+            const { taskId, errorId, errorDescription } = create.body;
+            if (errorId !== 0) throw new Error(errorDescription || "Create Task Failed");
+            let pollCount = 0;
+            const POLL_LIMIT = 30; // Increased limit
+            while (!signal?.aborted) {
+                pollCount++;
+                if (pollCount > POLL_LIMIT) {
+                    logSolver(`[Worker #${id}] CapMonster Polling limit reached. Retrying task...`, "#f59e0b");
+                    break; // break inner poll loop to recreate task
+                }
+                await new Promise(r => setTimeout(r, 1500)); // slightly slower poll
+                if (signal?.aborted) return null;
+                const check = await gotScraping.post(`${API}/getTaskResult`, {
+                    json: { clientKey: CapInfo.key, taskId },
+                    responseType: "json", signal,
+                    timeout: { request: 30000 }
+                });
+                const result = check.body;
+                if (result.errorId && result.errorId !== 0) throw new Error(result.errorDescription || "Task failed");
+                if (result.status === "ready" && result.solution?.token) return result.solution.token;
+                if (result.status === "failed") throw new Error("Task failed");
+            }
+        } catch (err) {
+            if (err.name === "AbortError") return null;
+            logSolver(`CapMonster Worker ${id} (Attempt ${attempts}) Failed: ${err.message}. Retrying...`, "#eab308");
+            await new Promise(r => setTimeout(r, 2000));
         }
-    } catch (err) {
-        if (err.name !== "AbortError") logSolver(`CapMonster Worker ${id} Failed: ${err.message}`, "#ef4444");
     }
     return null;
 }
 
 async function startWorkerCapSolver(id, signal) {
     const API = "https://api.capsolver.com";
-    try {
-        if (signal?.aborted) return null;
-        // logSolver(`[Worker #${id}] CapSolver Task Started`, "#f59e0b");
-        
-        const create = await gotScraping.post(`${API}/createTask`, {
-            json: {
-                clientKey: CapInfo.key,
-                task: { type: "AntiTurnstileTaskProxyLess", websiteURL: SITE_URL, websiteKey: TRANSIT_SITE_KEY }
-            },
-            responseType: "json", signal
-        });
-        
-        const createData = create.body;
-        if (createData.errorId !== 0) throw new Error(createData.errorDescription || "Create Task Failed");
-        
-        const taskId = createData.taskId;
-
-        let pollCount = 0;
-        const POLL_LIMIT = 8; 
-
-        while (!signal?.aborted) {
-            pollCount++;
-            if (pollCount > POLL_LIMIT) throw new Error(`Polling limit reached (${POLL_LIMIT}). Aborting task.`);
-
-            await new Promise(r => setTimeout(r, 1200));
+    let attempts = 0;
+    while (!signal?.aborted && attempts < 3) {
+        attempts++;
+        try {
             if (signal?.aborted) return null;
-            
-            const check = await gotScraping.post(`${API}/getTaskResult`, {
-                json: { clientKey: CapInfo.key, taskId },
-                responseType: "json", signal,
-                timeout: { request: 30000 }
+            const create = await gotScraping.post(`${API}/createTask`, {
+                json: {
+                    clientKey: CapInfo.key,
+                    task: { type: "AntiTurnstileTaskProxyLess", websiteURL: SITE_URL, websiteKey: TRANSIT_SITE_KEY }
+                },
+                responseType: "json", signal
             });
-            const result = check.body;
-            
-            if (result.errorId && result.errorId !== 0) throw new Error(result.errorDescription || "Task failed");
-            if (result.status === "ready" && result.solution?.token) return result.solution.token;
-            if (result.status === "failed") throw new Error("Task failed");
+            const createData = create.body;
+            if (createData.errorId !== 0) throw new Error(createData.errorDescription || "Create Task Failed");
+            const taskId = createData.taskId;
+            let pollCount = 0;
+            const POLL_LIMIT = 25; // Increased limit
+            while (!signal?.aborted) {
+                pollCount++;
+                if (pollCount > POLL_LIMIT) {
+                    logSolver(`[Worker #${id}] CapSolver Polling limit reached. Retrying task...`, "#f59e0b");
+                    break; // retry inner loop
+                }
+                await new Promise(r => setTimeout(r, 1500));
+                if (signal?.aborted) return null;
+                const check = await gotScraping.post(`${API}/getTaskResult`, {
+                    json: { clientKey: CapInfo.key, taskId },
+                    responseType: "json", signal,
+                    timeout: { request: 30000 }
+                });
+                const result = check.body;
+                if (result.errorId && result.errorId !== 0) throw new Error(result.errorDescription || "Task failed");
+                if (result.status === "ready" && result.solution?.token) return result.solution.token;
+                if (result.status === "failed") throw new Error("Task failed");
+            }
+        } catch (err) {
+            if (err.name === "AbortError") return null;
+            logSolver(`CapSolver Worker ${id} (Attempt ${attempts}) Failed: ${err.message}. Retrying...`, "#ef4444");
+            await new Promise(r => setTimeout(r, 2000));
         }
-    } catch (err) {
-        if (err.name !== "AbortError") logSolver(`CapSolver Worker ${id} Failed: ${err.message}`, "#ef4444");
     }
     return null;
 }
