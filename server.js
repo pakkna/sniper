@@ -392,7 +392,7 @@ async function startWorkerCapMonoster(id, signal) {
                     logSolver(`[Worker #${id}] CapMonster Polling limit reached. Retrying task...`, "#f59e0b");
                     break; // break inner poll loop to recreate task
                 }
-                await new Promise(r => setTimeout(r, 1500)); // slightly slower poll
+                await new Promise(r => setTimeout(r, 800));
                 if (signal?.aborted) return null;
                 const check = await gotScraping.post(`${API}/getTaskResult`, {
                     json: { clientKey: CapInfo.key, taskId },
@@ -438,7 +438,7 @@ async function startWorkerCapSolver(id, signal) {
                     logSolver(`[Worker #${id}] CapSolver Polling limit reached. Retrying task...`, "#f59e0b");
                     break; // retry inner loop
                 }
-                await new Promise(r => setTimeout(r, 1500));
+                await new Promise(r => setTimeout(r, 800));
                 if (signal?.aborted) return null;
                 const check = await gotScraping.post(`${API}/getTaskResult`, {
                     json: { clientKey: CapInfo.key, taskId },
