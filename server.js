@@ -868,36 +868,11 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
                 }
                 if (response.statusCode === 429) {
                     TaskManager.stopTask(taskName);
-                    logSolver(`${wTag} Send OTP 429 Blocked: ${data?.message}`, '#fbbf24');
+                    logSolver(`${wTag} SendOTP 429: ${data?.message}`, '#fbbf24');
                     showStatus(data?.message || "Rate Limited! Searching OTP...", "error");
                     
-                    if (email) {
-                        if (PRE_FETCHED_OTP && __IVAC_RETRY__?.enabled) {
-                            logSolver(`[429 Fallback] Using Pre-fetched OTP: ${PRE_FETCHED_OTP}`, '#10b981');
-                            const otpToUse = PRE_FETCHED_OTP;
-                            PRE_FETCHED_OTP = null;
-                            verifyOtpAggressive(mobile, otpToUse, __IVAC_RETRY__);
-                            return;
-                        }
-
-                        logSolver(`[429 Fallback] No pre-fetched OTP. Searching SMS API...`, '#3b82f6');
-                        lastGetOtp = []; 
-                        
-                        getGotClient("CheckActiveSMS").get(`https://sms.mrshuvo.xyz/ivac/${mobile}`, { responseType: "json", timeout: { request: 5000 } })
-                            .then(res => {
-                                const otpData = res.body?.data?.otp;
-                                if (otpData && otpData !== "Invalid" && otpData.length === 6) {
-                                    logSolver(`[429 Fallback] Found OTP waiting: ${otpData}. Bypassing ReserveOTP!`, '#10b981');
-                                    verifyOtpAggressive(mobile, otpData, __IVAC_RETRY__);
-                                } else {
-                                    logSolver(`[429 Fallback] No OTP found. Triggering ReserveOTP...`, '#f59e0b');
-                                    reserveOtp(email, mobile, __IVAC_RETRY__, false); // false = not pre-warmup, verify immediately
-                                }
-                            }).catch(() => {
-                                reserveOtp(email, mobile, __IVAC_RETRY__, false);
-                            });
-                    } else {
-                        logSolver(`Cannot fallback to ReserveOTP, no email matched!`, '#dc2626');
+                    if (email && authStorage.state.token) {
+                        reserveOtp(email, mobile, __IVAC_RETRY__, false);
                     }
                     return;
                 }
@@ -1054,7 +1029,7 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
                 
                 let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
                 if (res.statusCode === 403 || res.statusCode === 503) {
-                    waitMs = 2500 + Math.floor(Math.random() * 501); // 2.5s–3s
+                    waitMs = 4500 + Math.floor(Math.random() * 501); // 2.5s–3s
                 } else if (res.statusCode === 429) {
                     waitMs = 20000; // 20s
                 } else if ([500, 501, 502, 504, 520].includes(res.statusCode)) {

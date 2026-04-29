@@ -7,9 +7,9 @@ export const setDirectApi = (val) => { directApi = val; };
 
 export const dnsMap = {
     "api.ivacbd.com": [
-        "65.0.229.15",
-        "35.154.147.88",
-        "35.154.173.251"
+        "35.154.31.142",
+        "13.204.113.252",
+        "3.109.20.63"
     ]
 };
 
