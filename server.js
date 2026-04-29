@@ -176,7 +176,7 @@ function getGotClient(taskName, workerId) {
         const agentOpts = {
             keepAlive,
             maxSockets: useRotation ? 3 : 10,
-            timeout: 90000,
+            timeout: 180000,
             rejectUnauthorized: false
         };
 
@@ -184,7 +184,7 @@ function getGotClient(taskName, workerId) {
             http2: useHttp2,
             throwHttpErrors: false,
             retry: { limit: 0 },
-            timeout: { request: 120000 },
+            timeout: { request: 180000 },
             proxyUrl: proxyUrl,
             agent: {
                 http: new HttpAgent(agentOpts),
@@ -347,6 +347,15 @@ const TaskManager = {
 let sendOtpWorkerCount = 0;
 let verifyOtpWorkerCount = 0;
 let reserveSlotWorkerCount = 0;
+
+let global403PauseUntil = 0;
+let sendOtp403Count = 0;
+let lastSendOtp403Time = 0;
+let verifyOtp403Count = 0;
+let lastVerifyOtp403Time = 0;
+let reserveSlot403Count = 0;
+let lastReserveSlot403Time = 0;
+
 let isOtpVerifyAggressive = false;
 let isReserveStarted = false;
 let isReserveOtpSend = false;
@@ -659,6 +668,10 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
     const trySend = async (workerId, oldTokenToUse = null, oldTokenTime = null) => {
         if (controller.signal.aborted) return;
         
+        if (global403PauseUntil && Date.now() < global403PauseUntil) {
+            return TaskManager.setTimeout(taskName, () => trySend(workerId, oldTokenToUse, oldTokenTime), global403PauseUntil - Date.now());
+        }
+
         const wTag = `[W-${workerId}|${getNetworkTitle(workerId)}]`;
         logSolver(`${wTag} ReserveOTP Started`, "#3b82f6");
         try {
@@ -714,6 +727,18 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
                     return showStatus(data?.message || data?.error || "Failed", "error");
                 }
                 let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
+                
+                if (res.statusCode === 403) {
+                    if (Date.now() - lastSendOtp403Time > 10000) sendOtp403Count = 0;
+                    sendOtp403Count++;
+                    lastSendOtp403Time = Date.now();
+                    if (sendOtp403Count >= sendOtpWorkerCount && sendOtpWorkerCount > 0) {
+                        global403PauseUntil = Date.now() + waitMs;
+                        logSolver(`[Cloud Rate Limit] All workers faced 403! Pausing ALL requests for ${waitMs/1000}s`, '#d55252');
+                        sendOtp403Count = 0;
+                    }
+                }
+
                 if (res.statusCode === 403 || res.statusCode === 503) {
                     waitMs = 2500 + Math.floor(Math.random() * 501); 
                 } else if (res.statusCode === 429) {
@@ -796,6 +821,10 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
         const controller = TaskManager.start(taskName);
         if (delay) await new Promise(r => TaskManager.setTimeout(taskName, r, delay));
         if (successTriggered || controller.signal.aborted) return;
+
+        if (global403PauseUntil && Date.now() < global403PauseUntil) {
+            return TaskManager.setTimeout(taskName, () => trySend(id, delay, oldTokenToUse, oldTokenTime), global403PauseUntil - Date.now());
+        }
 
         const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
         logSolver(`${wTag} SendOTP Started`, "#3b82f6");
@@ -885,6 +914,18 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
                 }
                 
                 let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
+
+                if (response.statusCode === 403) {
+                    if (Date.now() - lastSendOtp403Time > 10000) sendOtp403Count = 0;
+                    sendOtp403Count++;
+                    lastSendOtp403Time = Date.now();
+                    if (sendOtp403Count >= sendOtpWorkerCount && sendOtpWorkerCount > 0) {
+                        global403PauseUntil = Date.now() + waitMs;
+                        logSolver(`[Cloud Rate Limit] All workers faced 403! Pausing ALL requests for ${waitMs/1000}s`, '#d55252');
+                        sendOtp403Count = 0;
+                    }
+                }
+
                 if (response.statusCode === 403 || response.statusCode === 503) {
                     waitMs = 2500 + Math.floor(Math.random() * 501);
                 } else if (response.statusCode === 429) {
@@ -1021,6 +1062,10 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
         if (delay) await new Promise(r => TaskManager.setTimeout("verifyOtp", r, delay));
         if (successTriggered || controller.signal.aborted) return;
 
+        if (global403PauseUntil && Date.now() < global403PauseUntil) {
+            return TaskManager.setTimeout("verifyOtp", () => worker(id, delay), global403PauseUntil - Date.now());
+        }
+
         const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
         logSolver(`${wTag} VerifyOTP Started`, "#3b82f6");
         
@@ -1076,6 +1121,18 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
                 }
                 
                 let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
+
+                if (res.statusCode === 403) {
+                    if (Date.now() - lastVerifyOtp403Time > 10000) verifyOtp403Count = 0;
+                    verifyOtp403Count++;
+                    lastVerifyOtp403Time = Date.now();
+                    if (verifyOtp403Count >= verifyOtpWorkerCount && verifyOtpWorkerCount > 0) {
+                        global403PauseUntil = Date.now() + waitMs;
+                        logSolver(`[Cloud Rate Limit] All workers faced 403! Pausing ALL requests for ${waitMs/1000}s`, '#d55252');
+                        verifyOtp403Count = 0;
+                    }
+                }
+
                 if (res.statusCode === 403 || res.statusCode === 503) {
                     waitMs = 4500 + Math.floor(Math.random() * 501); // 4.5s-5s
                 } else if (res.statusCode === 429) {
@@ -1335,6 +1392,10 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
         const controller = TaskManager.start("reserveSlot");
         if (delay) await new Promise(r => TaskManager.setTimeout("reserveSlot", r, delay));
         if (successTriggered || controller.signal.aborted) return;
+        
+        if (global403PauseUntil && Date.now() < global403PauseUntil) {
+            return TaskManager.setTimeout("reserveSlot", () => worker(id, delay, reuseToken, reuseTokenTime), global403PauseUntil - Date.now());
+        }
 
         const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
 
@@ -1438,6 +1499,18 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                  }
                  
                  let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
+
+                 if (res.statusCode === 403) {
+                     if (Date.now() - lastReserveSlot403Time > 10000) reserveSlot403Count = 0;
+                     reserveSlot403Count++;
+                     lastReserveSlot403Time = Date.now();
+                     if (reserveSlot403Count >= reserveSlotWorkerCount && reserveSlotWorkerCount > 0) {
+                         global403PauseUntil = Date.now() + waitMs;
+                         logSolver(`[Cloud Rate Limit] All workers faced 403! Pausing ALL requests for ${waitMs/1000}s`, '#d55252');
+                         reserveSlot403Count = 0;
+                     }
+                 }
+
                  if (res.statusCode === 403 || res.statusCode === 503) waitMs = 4500 + Math.floor(Math.random() * 501); // 4.5s-5s
                  else if (res.statusCode === 429) waitMs = 20000; // 20s
                  else if ([500, 501, 502, 504, 520, 401].includes(res.statusCode)) waitMs = 800 + Math.floor(Math.random() * 401); // 800ms-1200ms
@@ -1546,7 +1619,7 @@ async function payNow(__IVAC_RETRY__, isBatch = false) {
         try {
             const res = await getGotClient(`PayNow-W${id}`, id).post(`${RootUrl}/iams/api/v1/payment/ssl/initiate`, {
                 headers: { "accept": "application/json, */*", "authorization": "Bearer " + accessToken },
-                responseType: "json", signal: controller.signal, timeout: { request: 120000 }
+                responseType: "json", signal: controller.signal, timeout: { request: 180000 }
             });
             const data = res.body;
 
