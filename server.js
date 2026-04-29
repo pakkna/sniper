@@ -493,12 +493,13 @@ async function solveAggressive() {
         const item = preSolvedTokens.shift();
         if (Date.now() - item.time <= 80000) {
             UI_SOCKET?.emit("btn-reset", { id: "solver", text: preSolvedTokens.length > 0 ? `🧩 Solver (${preSolvedTokens.length})` : "🧩 Solver" });
-            return item.token;
+            return { token: item.token, time: item.time };
         }
     }
 
-    // 2. No more restriction - allow parallel solvers to start whenever pool is empty
-    return await __solveAggressive();
+    const t = await __solveAggressive();
+    if (t) return { token: t, time: Date.now() };
+    return null;
 }
 
 async function __solveAggressive() {
@@ -655,27 +656,33 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
         return showStatus("Email required", "error");
     }
 
-    const trySend = async (workerId, oldTokenToUse = null) => {
+    const trySend = async (workerId, oldTokenToUse = null, oldTokenTime = null) => {
         if (controller.signal.aborted) return;
         
         const wTag = `[W-${workerId}|${getNetworkTitle(workerId)}]`;
         logSolver(`${wTag} ReserveOTP Started`, "#3b82f6");
         try {
             let tokenToUse;
+            let tokenTime;
             if (oldTokenToUse) {
                 tokenToUse = oldTokenToUse;
+                tokenTime = oldTokenTime;
             } else {
-                tokenToUse = await solveAggressive();
+                const solveRes = await solveAggressive();
+                if (!solveRes) { finishBtn("reserveOtp", "Reserve OTP"); return showStatus("Captcha failed", "error"); }
+                tokenToUse = solveRes.token;
+                tokenTime = solveRes.time;
             }
-            if (!tokenToUse) { finishBtn("reserveOtp", "Reserve OTP"); return showStatus("Captcha failed", "error"); }
 
             const payload = { email, "otpChannel": "PHONE", captchaToken: tokenToUse };
+            const reqStart = Date.now();
             const res = await getGotClient(`ReserveOTP-W${workerId}`, workerId).post(`${RootUrl}/iams/api/v1/forgot-password/sendOtp`, {
                 json: payload, responseType: "json", signal: controller.signal,
                 headers: { "accept": "application/json, text/plain, */*", "cache-control": "no-cache, no-store, must-revalidate" }
             });
 
             const data = res.body;
+            const reqDuration = Date.now() - reqStart;
 
             if (res.statusCode === 200 && data?.successFlag) {
                 TaskManager.stopTask(taskName);
@@ -707,10 +714,8 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
                     return showStatus(data?.message || data?.error || "Failed", "error");
                 }
                 let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
-                if (res.statusCode === 403) {
+                if (res.statusCode === 403 || res.statusCode === 503) {
                     waitMs = 2500 + Math.floor(Math.random() * 501); 
-                } else if (res.statusCode === 503) {
-                    waitMs = 800;
                 } else if (res.statusCode === 429) {
                     waitMs = 20000;
                 }else if ([500, 501, 502, 504, 520].includes(res.statusCode)) {
@@ -723,8 +728,11 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
                     logSolver(`${wTag} ReserveOTP Status [${res.statusCode}]`, '#d55252', data);
                 }
 
-                if ([403, 503].includes(res.statusCode)) {
-                    return TaskManager.setTimeout(taskName, () => trySend(workerId, tokenToUse), waitMs);
+                if ([403, 503, 502, 504].includes(res.statusCode)) {
+                    const isTokenFresh = (Date.now() - tokenTime) <= 50000;
+                    const tokenForRetry = (reqDuration < 3000 && isTokenFresh) ? tokenToUse : null;
+                    const timeForRetry = tokenForRetry ? tokenTime : null;
+                    return TaskManager.setTimeout(taskName, () => trySend(workerId, tokenForRetry, timeForRetry), waitMs);
                 } else {
                     return TaskManager.setTimeout(taskName, () => trySend(workerId), waitMs);
                 }
@@ -784,7 +792,7 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
     let successTriggered = false;
     let activeCount = 0;
 
-    const trySend = async (id, delay = 0, oldTokenToUse = null) => {
+    const trySend = async (id, delay = 0, oldTokenToUse = null, oldTokenTime = null) => {
         const controller = TaskManager.start(taskName);
         if (delay) await new Promise(r => TaskManager.setTimeout(taskName, r, delay));
         if (successTriggered || controller.signal.aborted) return;
@@ -793,21 +801,27 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
         logSolver(`${wTag} SendOTP Started`, "#3b82f6");
         try {
             let tokenToUse;
+            let tokenTime;
             if (oldTokenToUse) {
                 tokenToUse = oldTokenToUse;
+                tokenTime = oldTokenTime;
             } else {
-                tokenToUse = await solveAggressive();
+                const solveRes = await solveAggressive();
+                if (!solveRes) { finishBtn("sendOtp", "Send OTP"); return showStatus("Captcha failed", "error"); }
+                tokenToUse = solveRes.token;
+                tokenTime = solveRes.time;
             }
-            if (!tokenToUse) { finishBtn("sendOtp", "Send OTP"); return showStatus("Captcha failed", "error"); }
 
             const payload = { captchaToken: tokenToUse, phone: mobile, password: mbpassword };
 
+            const reqStart = Date.now();
             const response = await getGotClient(`SendOTP-W${id}`, id).post(`${RootUrl}/iams/api/v1/auth/signin`, {
                 json: payload, responseType: "json", signal: controller.signal,
                 headers: { "accept": "application/json, text/plain, */*", "cache-control": "no-cache, no-store, must-revalidate" }
             });
 
             const data = response.body;
+            const reqDuration = Date.now() - reqStart;
 
             if (response.statusCode === 200 && data?.successFlag) {
                 successTriggered = true;
@@ -871,10 +885,8 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
                 }
                 
                 let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
-                if (response.statusCode === 403) {
+                if (response.statusCode === 403 || response.statusCode === 503) {
                     waitMs = 2500 + Math.floor(Math.random() * 501);
-                } else if (response.statusCode === 503) {
-                    waitMs = 800;
                 } else if (response.statusCode === 429) {
                     waitMs = 20000; // 20s
                 } else if ([500, 501, 502, 504, 520].includes(response.statusCode)) {
@@ -899,8 +911,11 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
                     logSolver(`${wTag} Send OTP Status [${response.statusCode}]`, '#d55252', data);
                 }
 
-                if ([403, 503].includes(response.statusCode)) {
-                    return TaskManager.setTimeout(taskName, () => trySend(id, 0, tokenToUse), waitMs);
+                if ([403, 503, 502, 504].includes(response.statusCode)) {
+                    const isTokenFresh = (Date.now() - tokenTime) <= 50000;
+                    const tokenForRetry = (reqDuration < 3000 && isTokenFresh) ? tokenToUse : null;
+                    const timeForRetry = tokenForRetry ? tokenTime : null;
+                    return TaskManager.setTimeout(taskName, () => trySend(id, 0, tokenForRetry, timeForRetry), waitMs);
                 } else {
                     return TaskManager.setTimeout(taskName, () => trySend(id), waitMs);
                 }
@@ -1062,7 +1077,7 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
                 
                 let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
                 if (res.statusCode === 403 || res.statusCode === 503) {
-                    waitMs = 4500 + Math.floor(Math.random() * 501); // 2.5s–3s
+                    waitMs = 4500 + Math.floor(Math.random() * 501); // 4.5s-5s
                 } else if (res.statusCode === 429) {
                     waitMs = 20000; // 20s
                 } else if ([500, 501, 502, 504, 520].includes(res.statusCode)) {
@@ -1316,14 +1331,14 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
     let activeCount = 0;
     let batchFailed = 0;
 
-    const worker = async (id, delay = 0, reuseToken = null) => {
+    const worker = async (id, delay = 0, reuseToken = null, reuseTokenTime = null) => {
         const controller = TaskManager.start("reserveSlot");
         if (delay) await new Promise(r => TaskManager.setTimeout("reserveSlot", r, delay));
         if (successTriggered || controller.signal.aborted) return;
 
         const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
 
-        const onFail = (waitMs, reuseToken = null) => {
+        const onFail = (waitMs, reuseToken = null, reuseTokenTime = null) => {
             if (__IVAC_RETRY__.logic === "batch" && activeCount > 1) {
                 batchFailed++;
                 if (!worker.maxBatchWait || waitMs > worker.maxBatchWait) {
@@ -1336,27 +1351,32 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                     TaskManager.setTimeout("reserveSlot", () => reserveSlotAggressive(__IVAC_RETRY__, true), batchWait);
                 }
             } else {
-                TaskManager.setTimeout("reserveSlot", () => worker(id, 0, reuseToken), waitMs);
+                TaskManager.setTimeout("reserveSlot", () => worker(id, 0, reuseToken, reuseTokenTime), waitMs);
             }
         };
 
         let recapToken;
+        let tokenTime;
         if (reuseToken) {
             recapToken = reuseToken;
+            tokenTime = reuseTokenTime;
         } else {
-            let newToken = await solveAggressive();
-            if (newToken) { 
-                recapToken = encryptCaptchaToken(newToken);
+            let solveRes = await solveAggressive();
+            if (solveRes) { 
+                recapToken = encryptCaptchaToken(solveRes.token);
+                tokenTime = solveRes.time;
                 logSolver(`${wTag} ReserveSlot Started`, "#3b82f6");
             } else { finishBtn("reserveSlot", "Reserve Slot", "none"); return showStatus("Auto captcha solve failed!", "error"); }
         }
 
         try {
+            const reqStart = Date.now();
             const res = await getGotClient(`ReserveSlot-W${id}`, id).post(`${RootUrl}/iams/api/v1/slots/reserveSlot`, {
                 json: { captchaToken: recapToken }, headers, responseType: "json", signal: controller.signal,
                 context: { workerId: id }
             });
             const data = res.body;
+            const reqDuration = Date.now() - reqStart;
 
             if (res.statusCode === 200 && ["OK_NEW", "OK_EXISTING"].includes(data?.status) && data?.reservationId) {
                 logSolver(`${wTag} Slot Reserved Successfully`, '#16a34a', data);
@@ -1418,7 +1438,7 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                  }
                  
                  let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
-                 if (res.statusCode === 403 || res.statusCode === 503) waitMs = 2500 + Math.floor(Math.random() * 501); // 2.5s-3s
+                 if (res.statusCode === 403 || res.statusCode === 503) waitMs = 4500 + Math.floor(Math.random() * 501); // 4.5s-5s
                  else if (res.statusCode === 429) waitMs = 20000; // 20s
                  else if ([500, 501, 502, 504, 520, 401].includes(res.statusCode)) waitMs = 800 + Math.floor(Math.random() * 401); // 800ms-1200ms
                  else if ([400].includes(res.statusCode)) waitMs = 1000;
@@ -1435,7 +1455,13 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
 
                  TaskManager.removeController("reserveSlot", controller);
                  
-                 if ([403, 503, 429].includes(res.statusCode)) {
+                 if ([403, 503, 502, 504].includes(res.statusCode)) {
+                      const isTokenFresh = (Date.now() - tokenTime) <= 50000;
+                      const tokenForRetry = (reqDuration < 3000 && isTokenFresh) ? recapToken : null;
+                      const timeForRetry = tokenForRetry ? tokenTime : null;
+                      logSolver(`${wTag} Next Hit ${(waitMs/1000).toFixed(2)}s`);
+                      return onFail(waitMs, tokenForRetry, timeForRetry);
+                  } else if (res.statusCode === 429) {
                       logSolver(`${wTag} Next Hit ${(waitMs/1000).toFixed(2)}s`);
                       return onFail(waitMs, null);
                   }
