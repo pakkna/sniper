@@ -176,7 +176,7 @@ function getGotClient(taskName, workerId) {
         const agentOpts = {
             keepAlive,
             maxSockets: useRotation ? 3 : 10,
-            timeout: 60000,
+            timeout: 90000,
             rejectUnauthorized: false
         };
 
@@ -733,12 +733,17 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
             finishBtn("reserveOtp", "Reserve OTP");
             TaskManager.removeController(taskName, controller);
         } catch (err) {
-            if (err.name !== "AbortError" && __IVAC_RETRY__?.enabled) {
-                logSolver(`${wTag} Send OTP Cross Error: ${err.message}`, '#d55252');
-                return TaskManager.setTimeout(taskName, () => trySend(workerId), 1000);
-            }
+            if (err.name === "AbortError") return;
             TaskManager.removeController(taskName, controller);
-            finishBtn("reserveOtp", "Reserve OTP");
+            if (__IVAC_RETRY__?.enabled) {
+                logSolver(`${wTag} Send OTP Network Error: ${err.message}`, '#d55252');
+                return TaskManager.setTimeout(taskName, () => trySend(workerId), 1000);
+            } else {
+                logSolver(`${wTag} Send OTP Network Error: ${err.message}`, '#d55252');
+                finishBtn("reserveOtp", "Reserve OTP", "none");
+                showStatus("Reserve OTP Failed: " + err.message, "error");
+                TaskManager.stopTask(taskName);
+            }
         }
     };
     
@@ -904,12 +909,17 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
             finishBtn("sendOtp", "Send OTP", "none");
             TaskManager.removeController(taskName, controller);
         } catch (err) {
-            if (err.name !== "AbortError" && __IVAC_RETRY__?.enabled) {
-                logSolver(`${wTag} Send OTP Cross Error: ${err.message}`, '#d55252');
-                return TaskManager.setTimeout(taskName, () => trySend(id), 1000);
-            }
+            if (err.name === "AbortError") return;
             TaskManager.removeController(taskName, controller);
-            finishBtn("sendOtp", "Send OTP", "none");
+            if (__IVAC_RETRY__?.enabled) {
+                logSolver(`${wTag} Send OTP Network Error: ${err.message}`, '#d55252');
+                return TaskManager.setTimeout(taskName, () => trySend(id), 1000);
+            } else {
+                logSolver(`${wTag} Send OTP Network Error: ${err.message}`, '#d55252');
+                finishBtn("sendOtp", "Send OTP", "none");
+                showStatus("Send OTP Failed: " + err.message, "error");
+                TaskManager.stopTask(taskName);
+            }
         }
     };
 
@@ -1074,9 +1084,15 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
         } catch (e) {
             if (e.name === "AbortError") return;
             TaskManager.removeController("verifyOtp", controller);
-            showStatus(`[verifyOtp #${id}] Verify OTP failed!`, "error");
-            logSolver(`OTP Verify Failed!`, '#d55252');
-            if (__IVAC_RETRY__?.enabled) onFail(250);
+            if (__IVAC_RETRY__?.enabled) {
+                showStatus(`[verifyOtp #${id}] Verify OTP failed!`, "error");
+                logSolver(`OTP Verify Failed!`, '#d55252');
+                onFail(250);
+            } else {
+                showStatus(`[verifyOtp #${id}] Verify OTP failed: ${e.message}`, "error");
+                logSolver(`OTP Verify Failed: ${e.message}`, '#d55252');
+                TaskManager.stopTask("verifyOtp");
+            }
         }
         TaskManager.removeController("verifyOtp", controller);
     };
@@ -1256,10 +1272,16 @@ async function checkSlot(__IVAC_RETRY__) {
                 return;
             }
         } catch (err) {
-            if (err.name !== "AbortError" && __IVAC_RETRY__?.enabled) {
+            if (err.name === "AbortError") return;
+            if (__IVAC_RETRY__?.enabled) {
                 const waitSec = __IVAC_RETRY__.seconds || 10;
                 await new Promise(r => TaskManager.setTimeout(taskName, r, waitSec * 1000));
                 return trySlot();
+            } else {
+                TaskManager.stopTask(taskName);
+                logSolver(`CheckSlot Network Error: ${err.message}`, '#d55252');
+                finishBtn("checkSlot", "Check Slot");
+                showStatus("Check Slot Failed: " + err.message, "error");
             }
         }
     };
@@ -1372,10 +1394,15 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                      }
                  }
 
-                 if (res.statusCode === 503 && data?.data == null) {
-                     logSolver(`ReserveSlot Disabled [${res.statusCode}]`,'#d55252');
-                     TaskManager.stopTask("reserveSlot");
-                     return;
+                 if (res.statusCode === 503) {
+                     if (data && typeof data === 'object') {
+                         const msg = (data.message || data.error || "").toLowerCase();
+                         if (msg.includes("disable")) {
+                             logSolver(`ReserveSlot Disabled [${res.statusCode}]`,'#d55252');
+                             TaskManager.stopTask("reserveSlot");
+                             return;
+                         }
+                     }
                  }
 
                  if (!__IVAC_RETRY__?.enabled) {
@@ -1423,10 +1450,15 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
             TaskManager.removeController("reserveSlot", controller);
             if (__IVAC_RETRY__?.enabled) {
                 const wait = __IVAC_RETRY__.seconds || 10;
-                logSolver(`ReserveSlot Status Cross/Error`, '#b057ff');
+                logSolver(`${wTag} ReserveSlot Status Network Error: ${e.message}`, '#b057ff');
                 queueToken();
                 logSolver(`${wTag} ReserveSlot Next Hit ${wait}s`);
                 return onFail(wait * 1000, null);
+            } else {
+                TaskManager.stopTask("reserveSlot");
+                finishBtn("reserveSlot", "Reserve Slot", "none");
+                logSolver(`${wTag} ReserveSlot Status Network Error: ${e.message}`, '#d55252');
+                showStatus("Reserve Slot Failed: " + e.message, "error");
             }
         }
     };
@@ -1539,12 +1571,17 @@ async function payNow(__IVAC_RETRY__, isBatch = false) {
 
             TaskManager.removeController("payNow", controller);
         } catch (err) {
-            if (err.name !== "AbortError" && __IVAC_RETRY__?.enabled) {
-                logSolver(`${wTag} Payment network error`, '#d55252');
-                TaskManager.removeController("payNow", controller);
-                return onFail(1000);
-            }
+            if (err.name === "AbortError") return;
             TaskManager.removeController("payNow", controller);
+            if (__IVAC_RETRY__?.enabled) {
+                logSolver(`${wTag} Payment network error: ${err.message}`, '#d55252');
+                return onFail(1000);
+            } else {
+                TaskManager.stopTask("payNow");
+                finishBtn("payNow", "Pay Now", "none");
+                logSolver(`${wTag} Payment network error: ${err.message}`, '#d55252');
+                showStatus("Payment Failed: " + err.message, "error");
+            }
         }
     };
 
