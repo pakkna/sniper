@@ -284,7 +284,18 @@ function clearTlsSession(host) {
     return false;
 }
 
-
+function reloadDnsConfig() {
+    try {
+        const content = fs.readFileSync(path.join(__dirname, "dnsconfig.js"), "utf8");
+        const match = content.match(/"api\.ivacbd\.com"\s*:\s*\[(.*?)\]/s);
+        if (match) {
+            const ips = match[1].split(',').map(s => s.replace(/["'\s]/g, '')).filter(s => s);
+            if (ips.length > 0) dnsMap["api.ivacbd.com"] = ips;
+        }
+    } catch(e) {
+        console.error("Failed to reload dnsconfig", e);
+    }
+}
 
 // ==========================================
 // STATE ENGINE
@@ -959,9 +970,21 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
         UI_SOCKET?.emit("set-otp-value", "");
         UI_SOCKET?.emit("start-login-countdown", 15 * 60);
 
-        if (!isReserveStarted && __IVAC_RETRY__?.enabled) {
-            isReserveStarted = true;
-            reserveSlotAggressive(__IVAC_RETRY__);
+        const bdTime = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" }));
+        const hours = bdTime.getHours();
+        const mins = bdTime.getMinutes();
+        const totalMins = hours * 60 + mins;
+        const isWithinWindow = totalMins >= (17 * 60) && totalMins <= (19 * 60 + 30); // 5:00 PM to 7:30 PM
+
+        if (isWithinWindow) {
+            if (!isReserveStarted && __IVAC_RETRY__?.enabled) {
+                isReserveStarted = true;
+                reserveSlotAggressive(__IVAC_RETRY__);
+            }
+        } else {
+            TaskManager.stopAll();
+            logSolver(`[StopAll] Reservation Window (5:00 PM-7:30 PM)`, "#ef4444");
+            showStatus("Outside Hit Window. Stopped.", "error");
         }
     };
 
@@ -1345,7 +1368,7 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                          }
                          return;
                      } else {
-                         logSolver(`ReserveSlot 401 (Before 5:10 PM) -> Treating as Server Error (Retry)`, '#b057ff');
+                         logSolver(`[ReserveSlot] ${data?.message}`, '#b057ff');
                      }
                  }
 
@@ -1637,6 +1660,7 @@ io.on("connection", (socket) => {
 
     socket.on("update-direct-api", secure((val) => {
         setDirectApi(val);
+        reloadDnsConfig();
         const activeDns = directApi ? "Direct Router API" : (dnsMap["api.ivacbd.com"] || "Default API");
         logSolver(`🌐 Reservation DNS IP: ${activeDns}`, "#10b981");
     }));
@@ -1644,6 +1668,7 @@ io.on("connection", (socket) => {
         currentProxyState = state; 
         workerNetworkClients.clear(); 
         logSolver(`✔ Proxy Engine mapped to: ${state.activeMode}`, "#3b82f6"); 
+        reloadDnsConfig();
         const activeDns = directApi ? "Direct Router API" : (dnsMap["api.ivacbd.com"] || "Default API");
         logSolver(`🌐 Reservation DNS IP: ${activeDns}`, "#10b981");
     }));
@@ -1699,6 +1724,7 @@ io.on("connection", (socket) => {
         
         socket.emit("hide-export-session");
         io.emit("solver-clear");
+        reloadDnsConfig();
         const activeDns = directApi ? "Direct Router API" : (dnsMap["api.ivacbd.com"] || "Default API");
         logSolver("> ==============================", "#10b981");
         logSolver("> SOFTWARE Restart successfully", "#10b981");
