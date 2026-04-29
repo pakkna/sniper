@@ -200,7 +200,17 @@ function getGotClient(taskName, workerId) {
                         // STONGER ROTATION: Manual hostname override for deterministic IP targeting
                         if (useRotation && dnsMap[host]) {
                             const ips = dnsMap[host];
-                            const ip = Array.isArray(ips) ? ips[Math.floor(Math.random() * ips.length)] : ips;
+                            let ip;
+                            if (Array.isArray(ips)) {
+                                // Assign IP deterministically based on worker ID
+                                if (effectiveWorkerId && !isNaN(effectiveWorkerId)) {
+                                    ip = ips[(effectiveWorkerId - 1) % ips.length];
+                                } else {
+                                    ip = ips[Math.floor(Math.random() * ips.length)];
+                                }
+                            } else {
+                                ip = ips;
+                            }
                             
                             options.url.hostname = ip;
                             options.headers.host = host;
