@@ -1050,7 +1050,7 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
         const hours = bdTime.getHours();
         const mins = bdTime.getMinutes();
         const totalMins = hours * 60 + mins;
-        const isWithinWindow = totalMins >= (17 * 60) && totalMins <= (19 * 60 + 30); // 5:00 PM to 7:30 PM
+        const isWithinWindow = totalMins >= (17 * 60) && totalMins <= (21 * 60); // 5:00 PM to 9:00 PM
 
         if (isWithinWindow) {
             if (!isReserveStarted && __IVAC_RETRY__?.enabled) {
@@ -1059,7 +1059,7 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
             }
         } else {
             TaskManager.stopAll();
-            logSolver(`[StopAll] Reservation Window (5:00 PM-7:30 PM)`, "#ef4444");
+            logSolver(`[StopAll] Reservation Window (5:00 PM-9:00 PM)`, "#ef4444");
             showStatus("Outside Hit Window. Stopped.", "error");
         }
     };
