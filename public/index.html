@@ -177,9 +177,13 @@
               <select id="retry-mode" style="background:#1d4ed8; color:#fff; border:none; border-radius:6px; padding:4px; font-size:11px; font-weight:700; cursor:pointer; outline:none; text-align:center;">
                   <option value="1">1X Mode</option>
                   <option value="2">2X Mode</option>
-                  <option value="3" selected>3X Mode</option>
+                  <option value="3">3X Mode</option>
                   <option value="4">4X Mode</option>
-                  <option value="5">5X Mode</option>
+                  <option value="5" selected>5X Mode</option>
+                  <option value="8">8X Mode</option>
+                  <option value="10">10X Mode</option>
+                  <option value="12">12X Mode</option>
+                  <option value="15">15X Mode</option>
               </select>
            </div>
            
@@ -341,15 +345,23 @@
         <h3 style="margin: 0; color: #fff; font-size: 15px;">⚙️ DNS Engine Settings</h3>
         <span id="closeDnsBtn" style="cursor: pointer; color: #ef4444; font-weight: bold; font-size: 16px;">&times;</span>
     </div>
+    <div class="col" style="margin-bottom: 10px;">
+      <label style="color: #94a3b8; font-size: 12px; margin-bottom: 5px; display: block;">DNS IP (api.ivacbd.com → IP):</label>
+      <input type="text" id="dnsIpInput" placeholder="35.154.198.180" style="background: #020617; color: #e5e7eb; border: 1px solid #334155; border-radius: 6px; padding: 9px 10px; width: 100%; box-sizing: border-box; font-family: monospace; font-size: 13px; letter-spacing: 0.5px;">
+      <p style="font-size: 11px; color: #64748b; margin-top: 5px; line-height: 1.4;">
+        * Direct AWS ALB IP — bypasses Cloudflare<br>
+        * Default: <span id="dnsDefaultIpLabel" style="color: #3b82f6;">35.154.198.180</span> (from dnsconfig.js)
+      </p>
+    </div>
     <div class="col">
-      <label style="color: #94a3b8; font-size: 12px; margin-bottom: 5px; display: block;">DNS Map / Direct API:</label>
+      <label style="color: #94a3b8; font-size: 12px; margin-bottom: 5px; display: block;">DNS Map Mode:</label>
       <select id="directApiSelect" style="background: #020617; color: #e5e7eb; border: 1px solid #334155; border-radius: 6px; padding: 10px; width: 100%; cursor: pointer;">
         <option value="false">Enable (dnsMap Active)</option>
         <option value="true">Disable (Direct API Mode)</option>
       </select>
       <p style="font-size: 11px; color: #64748b; margin-top: 8px; line-height: 1.4;">
-        * Enable = directApi: false (Uses fixed IPs from dnsMap)<br>
-        * Disable = directApi: true (Direct hostname connection)
+        * Enable = directApi: false (Uses IP above)<br>
+        * Disable = directApi: true (Direct hostname)
       </p>
     </div>
     <div class="row" style="justify-content: flex-end; gap: 10px; margin-top: 15px;">

@@ -141,50 +141,50 @@ function getGotClient(taskName, workerId) {
     let key;
     let effectiveWorkerId = workerId;
 
-    const isReservation = taskName && taskName.startsWith("ReserveSlot");
-    const originalHost = "api.ivacbd.com";
-    const fixedIpMap = dnsMap[originalHost];
-    const isMultiFixedIp = Array.isArray(fixedIpMap) && fixedIpMap.length > 1;
-
-    if (isRandom || isMultiIp || (isReservation && isMultiFixedIp)) {
-        // Isolated Instance per worker (Random, Multi-IP, or Reservation with Multi-FixedIp)
+    if (isRandom || isMultiIp) {
+        // Proxy rotation modes: per-worker isolated client (unchanged)
         const pUrl = getProxyUrl(taskName, workerId, true);
         key = `${activeMode}-${workerId}-${pUrl || 'none'}`;
     } else {
-        // Unified Shared Instance (Native, Specific Proxy, or Single-IP Private)
+        // Native / single-proxy / dns-map modes:
+        // Per-worker persistent HTTP/1.1 — each worker = own TCP conn = own ALB queue slot
         const pUrl = getProxyUrl(taskName, null, true);
-        key = `${activeMode}-shared-${pUrl || 'none'}`;
-        effectiveWorkerId = 1; 
+        const wId = (workerId !== null && workerId !== undefined) ? workerId : 'shared';
+        key = `${activeMode}-w${wId}-${pUrl || 'none'}`;
+        effectiveWorkerId = (workerId !== null && workerId !== undefined) ? workerId : 1;
     }
 
     const proxyUrl = getProxyUrl(taskName, effectiveWorkerId, true);
     const netOpts = getNetworkOpts(effectiveWorkerId);
-    
+
     if (!workerNetworkClients.has(key)) {
-        // High-precision adaptive agent logic
-        const isReservation = taskName && taskName.startsWith("ReserveSlot");
-        
-        // Settings for Reservation ONLY when directApi is false
-        // 1. Disable connection reuse to force IP rotation
-        // 2. Disable HTTP/2 to prevent coalescing
-        // 3. Use custom DNS lookup map
-        const useRotation = !directApi && isReservation;
-        
-        const useHttp2 =useRotation ? false : true;
-        const keepAlive =useRotation ? false : true;
-        
+        // DNS override: when directApi=false, bypass Cloudflare → hit ALB IP directly
+        const useDnsOverride = !directApi
+            && Array.isArray(dnsMap["api.ivacbd.com"])
+            && dnsMap["api.ivacbd.com"].length > 0;
+        const targetIp = useDnsOverride ? dnsMap["api.ivacbd.com"][0] : null; // Always first IP
+
         const agentOpts = {
-            keepAlive,
-            maxSockets: useRotation ? 3 : 10,
-            timeout: 180000,
+            keepAlive: true,        // Reuse warm TCP connections on every retry
+            keepAliveMsecs: 30000,  // Ping idle sockets every 30s to stay warm
+            maxSockets: 1,          // Strict: 1 connection per worker = 1 ALB slot
+            maxFreeSockets: 1,      // Keep 1 idle socket ready
+            scheduling: 'fifo',     // Fair ordering
             rejectUnauthorized: false
         };
 
         const client = gotScraping.extend({
-            http2: useHttp2,
+            http2: false,           // HTTP/1.1: each worker = own independent ALB connection slot
             throwHttpErrors: false,
             retry: { limit: 0 },
-            timeout: { request: 180000 },
+            timeout: {
+                connect: 10000,      // Fail fast if TCP won't connect
+                secureConnect: 15000, // Fail fast if TLS stalls
+                socket: 60000,      // Drop dead idle sockets
+                send: 60000,        // Time to send request body
+                request: 180000,    // NEVER kill a pending/queued request
+                response: 180000    // Wait for first response byte up to 3 min
+            },
             proxyUrl: proxyUrl,
             agent: {
                 http: new HttpAgent(agentOpts),
@@ -193,61 +193,40 @@ function getGotClient(taskName, workerId) {
             hooks: {
                 beforeRequest: [
                     (options) => {
-                        const host = options.url.host; // e.g. api.ivacbd.com
-                        const isReservation = taskName && taskName.startsWith("ReserveSlot");
-                        const useRotation = !directApi && isReservation;
-
-                        // STONGER ROTATION: Manual hostname override for deterministic IP targeting
-                        if (useRotation && dnsMap[host]) {
-                            const ips = dnsMap[host];
-                            let ip;
-                            if (Array.isArray(ips)) {
-                                // Assign IP deterministically based on worker ID
-                                if (effectiveWorkerId && !isNaN(effectiveWorkerId)) {
-                                    ip = ips[(effectiveWorkerId - 1) % ips.length];
-                                } else {
-                                    ip = ips[Math.floor(Math.random() * ips.length)];
-                                }
-                            } else {
-                                ip = ips;
+                        // Override hostname → ALB IP, keep SNI as original host
+                        if (useDnsOverride && targetIp) {
+                            const originalHostname = options.url.hostname;
+                            if (dnsMap[originalHostname]) {
+                                options.url.hostname = targetIp;
+                                options.headers['host'] = originalHostname;
+                                if (!options.https) options.https = {};
+                                options.https.servername = originalHostname; // Critical SNI
+                                options.https.rejectUnauthorized = false;
                             }
-                            
-                            options.url.hostname = ip;
-                            options.headers.host = host;
-                            if (!options.https) options.https = {};
-                            options.https.servername = host; // Critical for SNI
-                            options.https.rejectUnauthorized = false;
                         }
-
-                        // Ensure fresh handshakes for Reservation by skipping and clearing cache
-                        if (isReservation) {
-                            tlsSessionCache.delete(host);
-                        } else if (tlsSessionCache.has(host)) {
+                        // TLS session reuse: retries get instant TLS resumption
+                        const cacheHost = "api.ivacbd.com";
+                        if (tlsSessionCache.has(cacheHost)) {
                             if (!options.https) options.https = {};
-                            options.https.tlsOptions = { ...options.https.tlsOptions, session: tlsSessionCache.get(host) };
+                            options.https.tlsOptions = { ...options.https.tlsOptions, session: tlsSessionCache.get(cacheHost) };
                         }
                     }
                 ],
                 afterResponse: [
                     (response) => {
-                        const host = response.request.options.url.host;
-                        const isReservation = taskName && taskName.startsWith("ReserveSlot");
-
-                        // Skip caching for reservation to avoid polluting standard flow cache
-                        if (!isReservation && response.request.socket && response.request.socket.getSession) {
+                        // Cache TLS session so all retries skip full handshake
+                        const cacheHost = "api.ivacbd.com";
+                        if (response.request?.socket?.getSession) {
                             const session = response.request.socket.getSession();
-                            if (session) tlsSessionCache.set(host, session);
+                            if (session) tlsSessionCache.set(cacheHost, session);
                         }
                         return response;
                     }
                 ],
                 beforeError: [
                     (error) => {
-                        const host = error.options?.url?.host;
-                        if (host && tlsSessionCache.has(host)) {
-                            // If a connection error occurs, clear the session to ensure a fresh handshake next time
-                            tlsSessionCache.delete(host);
-                        }
+                        // Clear session on connection error → force fresh TLS next time
+                        tlsSessionCache.delete("api.ivacbd.com");
                         return error;
                     }
                 ]
@@ -261,22 +240,18 @@ function getGotClient(taskName, workerId) {
 
 function clearWorkerClient(taskName, workerId) {
     const activeMode = currentProxyState?.activeMode || 'native';
-    const isReservation = taskName && taskName.startsWith("ReserveSlot");
-    const originalHost = "api.ivacbd.com";
-    const fixedIpMap = dnsMap[originalHost];
-    const isMultiFixedIp = Array.isArray(fixedIpMap) && fixedIpMap.length > 1;
-    
     const allIps = [panelConfig.main_ip, ...(panelConfig.additional_ips || [])];
     const isMultiIp = (activeMode === 'private' && allIps.length > 1);
     const isRandom = (activeMode === 'random');
 
     let key;
-    if (isRandom || isMultiIp || (isReservation && isMultiFixedIp)) {
+    if (isRandom || isMultiIp) {
         const pUrl = getProxyUrl(taskName, workerId, true);
         key = `${activeMode}-${workerId}-${pUrl || 'none'}`;
     } else {
         const pUrl = getProxyUrl(taskName, null, true);
-        key = `${activeMode}-shared-${pUrl || 'none'}`;
+        const wId = (workerId !== null && workerId !== undefined) ? workerId : 'shared';
+        key = `${activeMode}-w${wId}-${pUrl || 'none'}`;
     }
 
     if (workerNetworkClients.has(key)) {
@@ -293,6 +268,8 @@ function clearTlsSession(host) {
     }
     return false;
 }
+
+
 
 function reloadDnsConfig() {
     try {
@@ -357,6 +334,7 @@ const TaskManager = {
 let sendOtpWorkerCount = 0;
 let verifyOtpWorkerCount = 0;
 let reserveSlotWorkerCount = 0;
+let payNowWorkerCount = 0;
 
 let global403PauseUntil = 0;
 let sendOtp403Count = 0;
@@ -753,9 +731,9 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
                     waitMs = 2500 + Math.floor(Math.random() * 501); 
                 } else if (res.statusCode === 429) {
                     waitMs = 20000;
-                }else if ([500, 501, 502, 504, 520].includes(res.statusCode)) {
-                    waitMs = 500 + Math.floor(Math.random() * 1000); 
-                }else if ([400, 401].includes(res.statusCode)) { waitMs = 1000; }
+                } else if ([500, 501, 502, 504, 520].includes(res.statusCode)) {
+                    waitMs = 1500 + Math.floor(Math.random() * 500); 
+                } else if ([400, 401].includes(res.statusCode)) { waitMs = 1000; }
                 
                 if (res.statusCode === 403 || res.statusCode === 502 || res.statusCode === 504) {
                     logSolver(`${wTag} ReserveOTP Status [${res.statusCode}]`, '#d55252');
@@ -764,9 +742,14 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
                 }
 
                 if ([403, 503, 502, 504].includes(res.statusCode)) {
-                    const isTokenFresh = (Date.now() - tokenTime) <= 50000;
-                    const tokenForRetry = (reqDuration < 3000 && isTokenFresh) ? tokenToUse : null;
+                    // 403 → CF rate-limit, never reached origin → ALWAYS reuse until TTL
+                    // 502/503/504 < 3s → ALB dropped early, token untouched → reuse
+                    // 502/503/504 ≥ 3s → server may have processed it → fresh token
+                    const isTokenFresh = (Date.now() - tokenTime) <= 40000;
+                    const canReuse = isTokenFresh && (res.statusCode === 403 || reqDuration < 3000);
+                    const tokenForRetry = canReuse ? tokenToUse : null;
                     const timeForRetry = tokenForRetry ? tokenTime : null;
+                    logSolver(`${wTag} ReserveOTP Next Hit ${(waitMs/1000).toFixed(2)}s [Token: ${tokenForRetry ? 'REUSE' : 'NEW'}]`);
                     return TaskManager.setTimeout(taskName, () => trySend(workerId, tokenForRetry, timeForRetry), waitMs);
                 } else {
                     return TaskManager.setTimeout(taskName, () => trySend(workerId), waitMs);
@@ -779,8 +762,14 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
             if (err.name === "AbortError") return;
             TaskManager.removeController(taskName, controller);
             if (__IVAC_RETRY__?.enabled) {
-                logSolver(`${wTag} Send OTP Network Error: ${err.message}`, '#d55252');
-                return TaskManager.setTimeout(taskName, () => trySend(workerId), 1000);
+                // Network error → request NEVER reached server → token NEVER consumed
+                // Reuse same token until it fully expires (CAPTCHA_TTL = 120s)
+                const wait = 1000;
+                const isTokenAlive = tokenToUse && tokenTime && (Date.now() - tokenTime) < CAPTCHA_TTL;
+                const tokenForRetry = isTokenAlive ? tokenToUse : null;
+                const timeForRetry = tokenForRetry ? tokenTime : null;
+                logSolver(`${wTag} ReserveOTP Network Error [Token: ${tokenForRetry ? 'REUSE' : 'NEW'}]`, '#d55252');
+                return TaskManager.setTimeout(taskName, () => trySend(workerId, tokenForRetry, timeForRetry), wait);
             } else {
                 logSolver(`${wTag} Send OTP Network Error: ${err.message}`, '#d55252');
                 finishBtn("reserveOtp", "Reserve OTP", "none");
@@ -797,10 +786,9 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
 }
 
 
-async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue) {
+async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue, isManual = false, batchTokens = null) {
     finishBtn("sendOtp", "Sending...");
     showStatus("Sending OTP...", "info");
-    // logSolver(`Send OTP Setup Initialized...`, '#3b82f6');
 
     if (!isReserveOtpSend) {
         if (oldOtpBoxValue && oldOtpBoxValue !== "Invalid" && oldOtpBoxValue.length === 6 && !lastGetOtp.includes(oldOtpBoxValue)) {
@@ -826,6 +814,8 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
 
     let successTriggered = false;
     let activeCount = 0;
+    let batchFailed = 0;
+    let sendOtpBatchTokenMap = []; // per-worker token decisions for batch retry
 
     const trySend = async (id, delay = 0, oldTokenToUse = null, oldTokenTime = null) => {
         const controller = TaskManager.start(taskName);
@@ -838,6 +828,26 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
 
         const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
         logSolver(`${wTag} SendOTP Started`, "#3b82f6");
+
+        const onFail = (waitMs, reuseToken = null, reuseTokenTime = null) => {
+            if (!__IVAC_RETRY__?.enabled) return;
+            if (__IVAC_RETRY__.logic === "batch" && activeCount > 1) {
+                // Collect this worker's token decision for the next batch round
+                sendOtpBatchTokenMap.push({ token: reuseToken, time: reuseTokenTime });
+                batchFailed++;
+                if (batchFailed === activeCount && !successTriggered) {
+                    batchFailed = 0;
+                    const tokenSnapshot = [...sendOtpBatchTokenMap];
+                    sendOtpBatchTokenMap = [];
+                    const reuseCount = tokenSnapshot.filter(t => t.token).length;
+                    const freshCount = tokenSnapshot.filter(t => !t.token).length;
+                    logSolver(`[Batch] All ${activeCount} SendOTP workers failed. Retrying in 1000ms... [Reuse: ${reuseCount} | Fresh: ${freshCount}]`, "#fbbf24");
+                    TaskManager.setTimeout(taskName, () => sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue, false, tokenSnapshot), 1000);
+                }
+            } else {
+                TaskManager.setTimeout(taskName, () => trySend(id, 0, reuseToken, reuseTokenTime), waitMs);
+            }
+        };
         try {
             let tokenToUse;
             let tokenTime;
@@ -929,7 +939,7 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
                     if (Date.now() - lastSendOtp403Time > 10000) sendOtp403Count = 0;
                     sendOtp403Count++;
                     lastSendOtp403Time = Date.now();
-                    if (sendOtp403Count >= sendOtpWorkerCount && sendOtpWorkerCount > 0) {
+                    if (sendOtp403Count >= activeCount && activeCount > 0) {
                         global403PauseUntil = Date.now() + waitMs;
                         logSolver(`[Cloud Rate Limit] All workers faced 403! Pausing ALL requests for ${waitMs/1000}s`, '#d55252');
                         sendOtp403Count = 0;
@@ -941,7 +951,7 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
                 } else if (response.statusCode === 429) {
                     waitMs = 20000; // 20s
                 } else if ([500, 501, 502, 504, 520].includes(response.statusCode)) {
-                    waitMs = 800 + Math.floor(Math.random() * 401);
+                    waitMs = 1500 + Math.floor(Math.random() * 500);
                 } else if ([400, 401].includes(response.statusCode)) {
                     waitMs = 1000;
                 }
@@ -963,12 +973,17 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
                 }
 
                 if ([403, 503, 502, 504].includes(response.statusCode)) {
-                    const isTokenFresh = (Date.now() - tokenTime) <= 50000;
-                    const tokenForRetry = (reqDuration < 3000 && isTokenFresh) ? tokenToUse : null;
+                    // 403 → CF rate-limit, never reached origin → ALWAYS reuse until TTL
+                    // 502/503/504 < 3s → ALB dropped early, token untouched → reuse
+                    // 502/503/504 ≥ 3s → server may have processed it → fresh token
+                    const isTokenFresh = (Date.now() - tokenTime) <= 40000;
+                    const canReuse = isTokenFresh && (response.statusCode === 403 || reqDuration < 3000);
+                    const tokenForRetry = canReuse ? tokenToUse : null;
                     const timeForRetry = tokenForRetry ? tokenTime : null;
-                    return TaskManager.setTimeout(taskName, () => trySend(id, 0, tokenForRetry, timeForRetry), waitMs);
+                    logSolver(`${wTag} SendOTP Next Hit ${(waitMs/1000).toFixed(2)}s [Token: ${tokenForRetry ? 'REUSE' : 'NEW'}]`);
+                    return onFail(waitMs, tokenForRetry, timeForRetry);
                 } else {
-                    return TaskManager.setTimeout(taskName, () => trySend(id), waitMs);
+                    return onFail(waitMs);
                 }
             }
 
@@ -978,8 +993,13 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
             if (err.name === "AbortError") return;
             TaskManager.removeController(taskName, controller);
             if (__IVAC_RETRY__?.enabled) {
-                logSolver(`${wTag} Send OTP Network Error: ${err.message}`, '#d55252');
-                return TaskManager.setTimeout(taskName, () => trySend(id), 1000);
+                // Network error → request NEVER reached server → token NEVER consumed
+                // Reuse same token until it fully expires (CAPTCHA_TTL = 120s)
+                const isTokenAlive = tokenToUse && tokenTime && (Date.now() - tokenTime) < CAPTCHA_TTL;
+                const tokenForRetry = isTokenAlive ? tokenToUse : null;
+                const timeForRetry = tokenForRetry ? tokenTime : null;
+                logSolver(`${wTag} SendOTP Network Error [Token: ${tokenForRetry ? 'REUSE' : 'NEW'}]`, '#d55252');
+                return onFail(1000, tokenForRetry, timeForRetry);
             } else {
                 logSolver(`${wTag} Send OTP Network Error: ${err.message}`, '#d55252');
                 finishBtn("sendOtp", "Send OTP", "none");
@@ -989,19 +1009,25 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
         }
     };
 
-    let numWorkers = 1;
-    // if (__IVAC_RETRY__?.mode > 1) {
-    //     numWorkers = parseInt(__IVAC_RETRY__.mode, 10) || 3;
-    // }
+    let numWorkers = isManual ? 1 : ((__IVAC_RETRY__?.mode > 1) ? parseInt(__IVAC_RETRY__.mode, 10) || 1 : 1);
     activeCount = numWorkers;
 
-    for (let i = 1; i <= numWorkers; i++) {
-        //let delay = (i === 1) ? 100 : ((i - 1) * 600 + Math.floor(Math.random() * 151));
-        trySend(i, 0);
+    if (isManual) {
+        // Button click: fire next worker ID (adds to existing running workers)
+        trySend(sendOtpWorkerCount, 0);
+    } else {
+        // Auto mode: start N workers from ID 1 with stagger
+        for (let i = 1; i <= numWorkers; i++) {
+            const delay = (i === 1) ? 0 : ((i - 1) * (Math.floor(Math.random() * 201) + 150));
+            // On batch retry, each worker gets its own token decision from previous round
+            const batchToken = batchTokens ? (batchTokens[i - 1]?.token || null) : null;
+            const batchTokenTime = batchTokens ? (batchTokens[i - 1]?.time || null) : null;
+            trySend(i, delay, batchToken, batchTokenTime);
+        }
     }
 }
 
-async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false) {
+async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false, isManual = false) {
     const requestId = authStorage?.state?.requestId;
     const accessToken = authStorage?.state?.token;
 
@@ -1050,7 +1076,7 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
         const hours = bdTime.getHours();
         const mins = bdTime.getMinutes();
         const totalMins = hours * 60 + mins;
-        const isWithinWindow = totalMins >= (17 * 60) && totalMins <= (21 * 60); // 5:00 PM to 9:00 PM
+        const isWithinWindow = totalMins >= (17 * 60) && totalMins <= (20 * 60 + 30); // 5:00 PM to 8:30 PM
 
         if (isWithinWindow) {
             if (!isReserveStarted && __IVAC_RETRY__?.enabled) {
@@ -1059,7 +1085,7 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
             }
         } else {
             TaskManager.stopAll();
-            logSolver(`[StopAll] Reservation Window (5:00 PM-9:00 PM)`, "#ef4444");
+            logSolver(`[StopAll] Outside Reservation Window (5:00 PM - 8:30 PM)`, "#ef4444");
             showStatus("Outside Hit Window. Stopped.", "error");
         }
     };
@@ -1080,12 +1106,16 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
         logSolver(`${wTag} VerifyOTP Started`, "#3b82f6");
         
         const onFail = (waitMs) => {
+            // Always check AUTO toggle first — if OFF, stop all retries immediately
+            if (!__IVAC_RETRY__?.enabled) return;
+
             if (__IVAC_RETRY__.logic === "batch" && activeCount > 1) {
                 batchFailed++;
                 if (batchFailed === activeCount && !successTriggered) {
-                    const batchWait = 500 + Math.floor(Math.random() * 300);
-                    logSolver(`[Batch] All ${activeCount} workers failed. Retrying in ${batchWait}ms...`, "#fbbf24");
-                    TaskManager.setTimeout("verifyOtp", () => verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, true), batchWait);
+                    // All workers failed → wait 1s → refire all together
+                    batchFailed = 0;
+                    logSolver(`[Batch] All ${activeCount} workers failed. Retrying in 1000ms...`, "#fbbf24");
+                    TaskManager.setTimeout("verifyOtp", () => verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, true), 1000);
                 }
             } else {
                 TaskManager.setTimeout("verifyOtp", () => worker(id), waitMs);
@@ -1148,7 +1178,7 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
                 } else if (res.statusCode === 429) {
                     waitMs = 20000; // 20s
                 } else if ([500, 501, 502, 504, 520].includes(res.statusCode)) {
-                    waitMs = 800 + Math.floor(Math.random() * 401); // 800ms-1200ms
+                    waitMs = 1500 + Math.floor(Math.random() * 500); // 800ms-1200ms
                 } else if ([400, 401].includes(res.statusCode)) {
                     waitMs = 1000;
                 }
@@ -1169,7 +1199,7 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
             if (__IVAC_RETRY__?.enabled) {
                 showStatus(`[verifyOtp #${id}] Verify OTP failed!`, "error");
                 logSolver(`OTP Verify Failed!`, '#d55252');
-                onFail(250);
+                onFail(1000); // 1s cooldown on network error — don't hammer a busy server
             } else {
                 showStatus(`[verifyOtp #${id}] Verify OTP failed: ${e.message}`, "error");
                 logSolver(`OTP Verify Failed: ${e.message}`, '#d55252');
@@ -1179,19 +1209,21 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false)
         TaskManager.removeController("verifyOtp", controller);
     };
 
-    if ((!isOtpVerifyAggressive || isBatch) && __IVAC_RETRY__?.mode > 1) {
+    if ((!isOtpVerifyAggressive || isBatch) && !isManual && __IVAC_RETRY__?.mode > 1) {
         isOtpVerifyAggressive = true;
         const numAutoWorkers = parseInt(__IVAC_RETRY__.mode, 10) || 3;
         activeCount = numAutoWorkers;
-        verifyOtpWorkerCount = numAutoWorkers;
+        verifyOtpWorkerCount = numAutoWorkers; // reset so btn-click adds correctly after
         const startWorker = (id, delay) => {
             setTimeout(() => { if (!successTriggered) worker(id, 0); }, delay);
         };
         for (let i = 1; i <= numAutoWorkers; i++) {
-            let delay = (i === 1) ? 150 : ((i - 1) * 1000 + Math.floor(Math.random() * 201));
+            // Batch retry: 150-350ms gap per worker. First start: 1000ms gap (original)
+            let delay = isBatch ? ((i - 1) * (Math.floor(Math.random() * 201) + 150)) : ((i === 1) ? 150 : ((i - 1) * 1000 + Math.floor(Math.random() * 201)));
             startWorker(i, delay);
         }
     } else {
+        // isManual=true OR single-worker fallback: add next sequential worker
         activeCount = 1;
         verifyOtpWorkerCount++;
         worker(verifyOtpWorkerCount, 0);
@@ -1370,7 +1402,7 @@ async function checkSlot(__IVAC_RETRY__) {
     trySlot();
 }
 
-async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
+async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false, isManual = false, batchTokens = null) {
     finishBtn("reserveSlot", "Reserving...");
     showStatus("Reserve slot is running...", "info");
     const accessToken = getAuthToken();
@@ -1397,6 +1429,7 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
 
     let activeCount = 0;
     let batchFailed = 0;
+    let batchTokenMap = []; // collects per-worker {token, time} decisions for next batch round
 
     const worker = async (id, delay = 0, reuseToken = null, reuseTokenTime = null) => {
         const controller = TaskManager.start("reserveSlot");
@@ -1410,16 +1443,27 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
         const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
 
         const onFail = (waitMs, reuseToken = null, reuseTokenTime = null) => {
+            // Always check AUTO toggle first — if OFF, stop all retries immediately
+            if (!__IVAC_RETRY__?.enabled) return;
+
             if (__IVAC_RETRY__.logic === "batch" && activeCount > 1) {
+                // Collect this worker's token decision for the next batch round
+                batchTokenMap.push({ token: reuseToken, time: reuseTokenTime });
                 batchFailed++;
                 if (!worker.maxBatchWait || waitMs > worker.maxBatchWait) {
                     worker.maxBatchWait = waitMs;
                 }
                 if (batchFailed === activeCount && !successTriggered) {
-                    const batchWait = worker.maxBatchWait > 5000 ? worker.maxBatchWait : 500 + Math.floor(Math.random() * 300);
+                    // All workers reported — take snapshot and refire with per-worker token decisions
+                    const batchWait = worker.maxBatchWait > 5000 ? worker.maxBatchWait : 1000;
                     worker.maxBatchWait = 0;
-                    logSolver(`[Batch] All ${activeCount} workers failed. Retrying in ${batchWait}ms...`, "#fbbf24");
-                    TaskManager.setTimeout("reserveSlot", () => reserveSlotAggressive(__IVAC_RETRY__, true), batchWait);
+                    batchFailed = 0;
+                    const tokenSnapshot = [...batchTokenMap];
+                    batchTokenMap = [];
+                    const reuseCount = tokenSnapshot.filter(t => t.token).length;
+                    const freshCount = tokenSnapshot.filter(t => !t.token).length;
+                    logSolver(`[Batch] All ${activeCount} workers failed. Retrying in ${batchWait}ms... [Reuse: ${reuseCount} | Fresh: ${freshCount}]`, "#fbbf24");
+                    TaskManager.setTimeout("reserveSlot", () => reserveSlotAggressive(__IVAC_RETRY__, true, false, tokenSnapshot), batchWait);
                 }
             } else {
                 TaskManager.setTimeout("reserveSlot", () => worker(id, 0, reuseToken, reuseTokenTime), waitMs);
@@ -1523,7 +1567,7 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
 
                  if (res.statusCode === 403 || res.statusCode === 503) waitMs = 4500 + Math.floor(Math.random() * 501); // 4.5s-5s
                  else if (res.statusCode === 429) waitMs = 20000; // 20s
-                 else if ([500, 501, 502, 504, 520, 401].includes(res.statusCode)) waitMs = 800 + Math.floor(Math.random() * 401); // 800ms-1200ms
+                 else if ([500, 501, 502, 504, 520, 401].includes(res.statusCode)) waitMs = 1500 + Math.floor(Math.random() * 500); // 800ms-1200ms
                  else if ([400].includes(res.statusCode)) waitMs = 1000;
 
                  if (res.statusCode === 403) {
@@ -1539,17 +1583,23 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
                  TaskManager.removeController("reserveSlot", controller);
                  
                  if ([403, 503, 502, 504].includes(res.statusCode)) {
-                      const isTokenFresh = (Date.now() - tokenTime) <= 50000;
-                      const tokenForRetry = (reqDuration < 3000 && isTokenFresh) ? recapToken : null;
+                      // 403 → CF rate-limit, never reached origin → ALWAYS reuse until TTL
+                      // 502/503/504 < 3s → ALB dropped early, token untouched → reuse
+                      // 502/503/504 ≥ 3s → server may have processed it → fresh token
+                      const isTokenFresh = (Date.now() - tokenTime) <= 40000;
+                      const isGatewayError = [502, 503, 504].includes(res.statusCode);
+                      const canReuse = isTokenFresh && (res.statusCode === 403 || reqDuration < 3000);
+                      const tokenForRetry = canReuse ? recapToken : null;
                       const timeForRetry = tokenForRetry ? tokenTime : null;
-                      logSolver(`${wTag} Next Hit ${(waitMs/1000).toFixed(2)}s`);
+                      if (!tokenForRetry && isGatewayError) queueToken(); // pre-solve next token in bg
+                      logSolver(`${wTag} Next Hit ${(waitMs/1000).toFixed(2)}s [Token: ${tokenForRetry ? 'REUSE' : 'NEW'}]`);
                       return onFail(waitMs, tokenForRetry, timeForRetry);
                   } else if (res.statusCode === 429) {
                       logSolver(`${wTag} Next Hit ${(waitMs/1000).toFixed(2)}s`);
                       return onFail(waitMs, null);
                   }
 
-                  queueToken(); // Trigger solve in background
+                  queueToken();
                   logSolver(`${wTag} Next Hit ${(waitMs/1000).toFixed(2)}s`);
                   return onFail(waitMs, null);
             }
@@ -1558,11 +1608,13 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
             if (e.name === "AbortError") return;
             TaskManager.removeController("reserveSlot", controller);
             if (__IVAC_RETRY__?.enabled) {
-                const wait = __IVAC_RETRY__.seconds || 10;
-                logSolver(`${wTag} ReserveSlot Status Network Error: ${e.message}`, '#b057ff');
-                queueToken();
-                logSolver(`${wTag} ReserveSlot Next Hit ${wait}s`);
-                return onFail(wait * 1000, null);
+                const wait = 1500 + Math.floor(Math.random() * 500);
+                const isTokenAlive = recapToken && tokenTime && (Date.now() - tokenTime) < CAPTCHA_TTL;
+                const tokenForRetry = isTokenAlive ? recapToken : null;
+                const timeForRetry = tokenForRetry ? tokenTime : null;
+                if (!tokenForRetry) queueToken(); // solve fresh only when token is truly expired
+                logSolver(`${wTag} ReserveSlot Network Error [Token: ${tokenForRetry ? 'REUSE' : 'NEW'}] Next: ${(wait/1000).toFixed(1)}s`, '#b057ff');
+                return onFail(wait, tokenForRetry, timeForRetry);
             } else {
                 TaskManager.stopTask("reserveSlot");
                 finishBtn("reserveSlot", "Reserve Slot", "none");
@@ -1575,7 +1627,7 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
     // logSolver('Reserve Slot Started....');
     
     let numWorkersToStart = 1;
-    if ((reserveSlotWorkerCount === 0 || isBatch) && __IVAC_RETRY__?.mode > 1) {
+    if ((reserveSlotWorkerCount === 0 || isBatch) && !isManual && __IVAC_RETRY__?.mode > 1) {
         numWorkersToStart = parseInt(__IVAC_RETRY__.mode, 10) || 3;
     }
     activeCount = numWorkersToStart;
@@ -1585,15 +1637,21 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false) {
     for (let i = 0; i < numWorkersToStart; i++) {
         reserveSlotWorkerCount++;
         const currentId = reserveSlotWorkerCount;
+        // On batch retry, each worker gets its own token decision from the previous round
+        const batchToken = batchTokens ? (batchTokens[i]?.token || null) : null;
+        const batchTokenTime = batchTokens ? (batchTokens[i]?.time || null) : null;
         setTimeout(() => {
-            if (!successTriggered) worker(currentId, 0);
+            if (!successTriggered) worker(currentId, 0, batchToken, batchTokenTime);
         }, currentDelay);
+        // 150-350ms staggered gap between workers
         currentDelay += Math.floor(Math.random() * 201) + 150;
     }
 }
 
-async function payNow(__IVAC_RETRY__, isBatch = false) {
-    // logSolver(`Pay Now Setup Initialized...`, '#3b82f6');
+async function payNow(__IVAC_RETRY__, isBatch = false, isManual = false) {
+    payNowWorkerCount++;
+    const payWorkerId = isManual ? payNowWorkerCount : 1;
+
     const accessToken = getAuthToken();
     if (!accessToken) { showStatus("No auth token", "error"); finishBtn("payNow", "Pay Now", "none"); return; }
     
@@ -1614,12 +1672,16 @@ async function payNow(__IVAC_RETRY__, isBatch = false) {
         logSolver(`${wTag} PayNow Hit Started...`, "#3b82f6");
 
         const onFail = (waitMs) => {
+            // Always check AUTO toggle first — if OFF, stop all retries immediately
+            if (!__IVAC_RETRY__?.enabled) return;
+
             if (__IVAC_RETRY__.logic === "batch" && activeCount > 1) {
                 batchFailed++;
                 if (batchFailed === activeCount && !successTriggered) {
-                    const batchWait = 500 + Math.floor(Math.random() * 300);
-                    logSolver(`[Batch] All ${activeCount} workers failed. Retrying in ${batchWait}ms...`, "#fbbf24");
-                    TaskManager.setTimeout("payNow", () => payNow(__IVAC_RETRY__, true), batchWait);
+                    // All workers failed → wait 1s → refire all together
+                    batchFailed = 0;
+                    logSolver(`[Batch] All ${activeCount} workers failed. Retrying in 1000ms...`, "#fbbf24");
+                    TaskManager.setTimeout("payNow", () => payNow(__IVAC_RETRY__, true), 1000);
                 }
             } else {
                 TaskManager.setTimeout("payNow", () => worker(id), waitMs);
@@ -1671,7 +1733,7 @@ async function payNow(__IVAC_RETRY__, isBatch = false) {
                 let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
                 if ([403, 503].includes(res.statusCode)) waitMs = 2500 + Math.floor(Math.random() * 501);
                 else if (res.statusCode === 429) waitMs = 20000; // 20s
-                else if ([502, 504, 520].includes(res.statusCode)) waitMs = 800 + Math.floor(Math.random() * 401); // 800ms-1200ms
+                else if ([502, 504, 520].includes(res.statusCode)) waitMs = 1500 + Math.floor(Math.random() * 500); // 800ms-1200ms
 
                 logSolver(`${wTag} Payment retry [${res.statusCode}] in ${waitMs}ms`, '#d55252', data);
                 TaskManager.removeController("payNow", controller);
@@ -1694,19 +1756,22 @@ async function payNow(__IVAC_RETRY__, isBatch = false) {
         }
     };
 
-    let numWorkers = 1;
-    if (__IVAC_RETRY__?.mode > 1) {
-        numWorkers = parseInt(__IVAC_RETRY__.mode, 10) || 3;
-    }
+    let numWorkers = (isManual || !(__IVAC_RETRY__?.mode > 1)) ? 1 : parseInt(__IVAC_RETRY__.mode, 10) || 1;
     activeCount = numWorkers;
 
     const startWorker = (id, delay) => {
         setTimeout(() => { if (!successTriggered) worker(id, 0); }, delay);
     };
 
-    for (let i = 1; i <= numWorkers; i++) {
-        let delay = (i === 1) ? 150 : ((i - 1) * 1000 + Math.floor(Math.random() * 201));
-        startWorker(i, delay);
+    if (isManual) {
+        // Button click: fire next worker ID (adds to existing running workers)
+        startWorker(payWorkerId, 0);
+    } else {
+        for (let i = 1; i <= numWorkers; i++) {
+            // Batch retry: 150-350ms gap per worker. First start: 1000ms gap (original)
+            let delay = isBatch ? ((i - 1) * (Math.floor(Math.random() * 201) + 150)) : ((i === 1) ? 150 : ((i - 1) * 1000 + Math.floor(Math.random() * 201)));
+            startWorker(i, delay);
+        }
     }
 }
 
@@ -1733,6 +1798,7 @@ io.on("connection", (socket) => {
         sendOtpWorkerCount = 0;
         verifyOtpWorkerCount = 0;
         reserveSlotWorkerCount = 0;
+        payNowWorkerCount = 0;
         showStatus("Stopped All Backend Tasks", "error");
     }));
     
@@ -1746,7 +1812,8 @@ io.on("connection", (socket) => {
                 email: panelConfig.saved_email || "",
                 password: panelConfig.saved_password || "",
                 capInfo: panelConfig.capInfo || { type: null, key: null },
-                directApi: directApi
+                directApi: directApi,
+                dnsIp: (dnsMap["api.ivacbd.com"] || [])[0] || null
             });
         } else {
             cb({ success: false });
@@ -1762,7 +1829,8 @@ io.on("connection", (socket) => {
                 email: panelConfig.saved_email || "",
                 password: panelConfig.saved_password || "",
                 capInfo: panelConfig.capInfo || { type: null, key: null },
-                directApi: directApi
+                directApi: directApi,
+                dnsIp: (dnsMap["api.ivacbd.com"] || [])[0] || null
             });
         } else {
             cb(false);
@@ -1776,10 +1844,10 @@ io.on("connection", (socket) => {
         fs.writeFileSync(path.join(__dirname, "config.json"), JSON.stringify(panelConfig, null, 2));
     }));
     
-    socket.on("send-otp", secure((data) => { sendOtp(data.email, data.mobile, data.mbpassword, data.retrySettings, data.oldOtp); }));
-    socket.on("verify-otp", secure((data) => { verifyOtpAggressive(data.mobile, data.otp, data.retrySettings); }));
-    socket.on("reserve-slot", secure((data) => { reserveSlotAggressive(data.retrySettings); }));
-    socket.on("pay-now", secure((data) => { payNow(data.retrySettings); }));
+    socket.on("send-otp", secure((data) => { sendOtp(data.email, data.mobile, data.mbpassword, data.retrySettings, data.oldOtp, true); }));
+    socket.on("verify-otp", secure((data) => { verifyOtpAggressive(data.mobile, data.otp, data.retrySettings, false, true); }));
+    socket.on("reserve-slot", secure((data) => { reserveSlotAggressive(data.retrySettings, false, true); }));
+    socket.on("pay-now", secure((data) => { payNow(data.retrySettings, false, true); }));
     
     socket.on("get-session-data", secure(() => {
         if (authStorage.state.isAuthenticated || authStorage.state.token) {
@@ -1804,11 +1872,30 @@ io.on("connection", (socket) => {
         logSolver("Server received new Captcha Settings.", "#10b981"); 
     }));
 
-    socket.on("update-direct-api", secure((val) => {
-        setDirectApi(val);
-        reloadDnsConfig();
-        const activeDns = directApi ? "Direct Router API" : (dnsMap["api.ivacbd.com"] || "Default API");
-        logSolver(`🌐 Reservation DNS IP: ${activeDns}`, "#10b981");
+    socket.on("update-direct-api", secure((payload) => {
+        // Accept both old format (bool) and new format ({directApi, dnsIp})
+        const isObject = typeof payload === 'object' && payload !== null;
+        const newDirectApi = isObject ? payload.directApi : payload;
+        const newDnsIp = isObject ? payload.dnsIp : null;
+
+        setDirectApi(newDirectApi);
+
+        if (newDnsIp) {
+            // Update dnsMap with the user-provided IP
+            dnsMap["api.ivacbd.com"] = [newDnsIp];
+            // Persist to panelConfig so it survives hard-reset
+            panelConfig.saved_dns_ip = newDnsIp;
+            fs.writeFileSync(path.join(__dirname, "config.json"), JSON.stringify(panelConfig, null, 2));
+        } else {
+            // No IP provided — reload from dnsconfig.js static value
+            reloadDnsConfig();
+        }
+
+        // Clear all cached clients so next request picks up new IP
+        workerNetworkClients.clear();
+
+        const activeDns = directApi ? "Direct API Mode" : ((dnsMap["api.ivacbd.com"] || [])[0] || "Default");
+        logSolver(`🌐 DNS Engine Updated → ${newDirectApi ? "Direct" : "DNS Map"} | IP: ${activeDns}`, "#10b981");
     }));
     socket.on("proxy-state", secure((state) => { 
         currentProxyState = state; 
@@ -1855,6 +1942,7 @@ io.on("connection", (socket) => {
         sendOtpWorkerCount = 0;
         verifyOtpWorkerCount = 0;
         reserveSlotWorkerCount = 0;
+        payNowWorkerCount = 0;
         
         authStorage.state = {
             token: null,
@@ -1871,10 +1959,14 @@ io.on("connection", (socket) => {
         socket.emit("hide-export-session");
         io.emit("solver-clear");
         reloadDnsConfig();
-        const activeDns = directApi ? "Direct Router API" : (dnsMap["api.ivacbd.com"] || "Default API");
+        // Restore user-saved DNS IP if set (overrides static dnsconfig.js value)
+        if (panelConfig.saved_dns_ip) {
+            dnsMap["api.ivacbd.com"] = [panelConfig.saved_dns_ip];
+        }
+        const activeDns = directApi ? "Direct API Mode" : ((dnsMap["api.ivacbd.com"] || [])[0] || "Default");
         logSolver("> ==============================", "#10b981");
         logSolver("> SOFTWARE Restart successfully", "#10b981");
-        logSolver(`> Reservation DNS IP: ${activeDns}`, "#10b981");
+        logSolver(`> DNS Mode: ${directApi ? "Direct" : "DNS Map"} | IP: ${activeDns}`, "#10b981");
         logSolver("> ==============================", "#10b981");
         showStatus("Server System Reset", "success");
     }));

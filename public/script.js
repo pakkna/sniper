@@ -133,6 +133,9 @@ const dnsSetting = $("DnsSetting");
 if (dnsSetting) {
     dnsSetting.onclick = () => {
         $("dnsModal").classList.remove("hidden");
+        // Pre-fill the input with currently saved IP (or default from server)
+        const savedIp = localStorage.getItem("dns_ip") || "";
+        $("dnsIpInput").value = savedIp;
     };
 }
 const closeDnsBtn = $("closeDnsBtn");
@@ -143,9 +146,13 @@ const dnsSave = $("dnsSave");
 if (dnsSave) {
     dnsSave.onclick = () => {
         const val = $("directApiSelect").value === "true";
-        socket.emit("update-direct-api", val);
+        const ip = $("dnsIpInput").value.trim();
+        // Save IP to localStorage so it persists across page reloads
+        if (ip) localStorage.setItem("dns_ip", ip);
+        socket.emit("update-direct-api", { directApi: val, dnsIp: ip || null });
         $("dnsModal").classList.add("hidden");
-        showStatus(`Engine Updated: directApi = ${val}`, "success");
+        const ipDisplay = ip || "default";
+        showStatus(`Engine Updated: ${val ? "Direct API" : "DNS Map"} | IP: ${ipDisplay}`, "success");
     };
 }
 
@@ -334,6 +341,13 @@ socket.on("initial-config", (config) => {
     }
     if (config.directApi !== undefined) {
         $("directApiSelect").value = config.directApi.toString();
+    }
+    if (config.dnsIp) {
+        // Restore active IP into input and update default label
+        $("dnsIpInput").value = config.dnsIp;
+        localStorage.setItem("dns_ip", config.dnsIp);
+        const label = $("dnsDefaultIpLabel");
+        if (label) label.textContent = config.dnsIp;
     }
 });
 
