@@ -128,7 +128,8 @@ function logProfile(pState, msg, color = "#fff", json = null) {
         profileId: pState.id,
         msg,
         color,
-        time: timeStr
+        time: timeStr,
+        json
     });
     
     // 3. UI Row Update
@@ -838,7 +839,7 @@ async function reserveOtp(pState, retrySettings, isPreWarmup = false) {
                 const tokenForRetry = canReuse ? tokenToUse : null;
                 const timeForRetry = tokenForRetry ? tokenTime : null;
                 
-                logProfile(pState, `ReserveOtp Retry [${res.statusCode}] in ${(waitMs/1000).toFixed(1)}s`, "#eab308");
+                logProfile(pState, `ReserveOtp Retry [${res.statusCode}] in ${(waitMs/1000).toFixed(1)}s`, "#eab308", data);
                 return TaskManager.setTimeout(taskName, () => trySend(workerId, tokenForRetry, timeForRetry), waitMs);
             }
         } catch (err) {
@@ -967,7 +968,7 @@ async function sendOtp(pState, retrySettings, oldOtpBoxValue = null, isManual = 
                 const tokenForRetry = canReuse ? tokenToUse : null;
                 const timeForRetry = tokenForRetry ? tokenTime : null;
                 
-                logProfile(pState, `Send OTP Retry [${response.statusCode}] in ${(waitMs/1000).toFixed(1)}s`, "#eab308");
+                logProfile(pState, `Send OTP Retry [${response.statusCode}] in ${(waitMs/1000).toFixed(1)}s`, "#eab308", data);
                 return onFail(waitMs, tokenForRetry, tokenTime);
             }
         } catch (err) {
@@ -1098,7 +1099,7 @@ async function verifyOtpAggressive(pState, otp, retrySettings, isAutoRetry = fal
                 if (res.statusCode === 403 || res.statusCode === 503) waitMs = 4500 + Math.floor(Math.random() * 501);
                 else if (res.statusCode === 429) waitMs = 20000;
                 
-                logProfile(pState, `Verify Retry [${res.statusCode}] in ${(waitMs/1000).toFixed(1)}s`, "#eab308");
+                logProfile(pState, `Verify Retry [${res.statusCode}] in ${(waitMs/1000).toFixed(1)}s`, "#eab308", data);
                 onFail(waitMs);
             }
         } catch (e) {
@@ -1386,7 +1387,7 @@ async function reserveSlotAggressive(pState, retrySettings, isAutoRetry = false,
                 const canReuse = isTokenFresh && (res.statusCode === 403 || reqDuration < 3000);
                 const tokenForRetry = canReuse ? recapToken : null;
                 
-                logProfile(pState, `Reserve Retry [${res.statusCode}] in ${(waitMs/1000).toFixed(1)}s`, "#eab308");
+                logProfile(pState, `Reserve Retry [${res.statusCode}] in ${(waitMs/1000).toFixed(1)}s`, "#eab308", data);
                 return onFail(waitMs, tokenForRetry, tokenTime);
             }
         } catch (e) {
@@ -1444,7 +1445,7 @@ async function payNow(pState, retrySettings, isAutoRetry = false, isManual = fal
             }
 
             const wait = (retrySettings.seconds || 5) * 1000;
-            logProfile(pState, `PayNow Retry [${res.statusCode}] in ${wait/1000}s`, "#eab308");
+            logProfile(pState, `PayNow Retry [${res.statusCode}] in ${wait/1000}s`, "#eab308", body);
             TaskManager.setTimeout(taskName, () => worker(id), wait);
 
         } catch (err) {

@@ -183,12 +183,10 @@ function initUI() {
     if (startAllBtn) {
         startAllBtn.addEventListener("click", () => {
             if (!socket.connected) return alert("❌ Connection lost! Please refresh the page.");
-            if (confirm("Start ALL profiles instantly?")) {
-                const retrySettings = getGlobalSettings();
-                socket.emit("all-profiles-start", { retrySettings });
-                startAllBtn.style.opacity = "0.5";
-                setTimeout(() => startAllBtn.style.opacity = "1", 500);
-            }
+            const retrySettings = getGlobalSettings();
+            socket.emit("all-profiles-start", { retrySettings });
+            startAllBtn.style.opacity = "0.5";
+            setTimeout(() => startAllBtn.style.opacity = "1", 500);
         });
     }
 
@@ -196,11 +194,9 @@ function initUI() {
     if (resetAllBtn) {
         resetAllBtn.addEventListener("click", () => {
             if (!socket.connected) return alert("❌ Connection lost! Please refresh the page.");
-            if (confirm("Reset ALL profiles? This clears all states and logs.")) {
-                socket.emit("all-profiles-reset");
-                resetAllBtn.style.opacity = "0.5";
-                setTimeout(() => resetAllBtn.style.opacity = "1", 500);
-            }
+            socket.emit("all-profiles-reset");
+            resetAllBtn.style.opacity = "0.5";
+            setTimeout(() => resetAllBtn.style.opacity = "1", 500);
         });
     }
 
@@ -208,11 +204,9 @@ function initUI() {
     if (stopAllGlobalBtn) {
         stopAllGlobalBtn.addEventListener("click", () => {
             if (!socket.connected) return alert("❌ Connection lost! Please refresh the page.");
-            if (confirm("Stop ALL active tasks?")) {
-                socket.emit("all-profiles-stop");
-                stopAllGlobalBtn.style.opacity = "0.5";
-                setTimeout(() => stopAllGlobalBtn.style.opacity = "1", 500);
-            }
+            socket.emit("all-profiles-stop");
+            stopAllGlobalBtn.style.opacity = "0.5";
+            setTimeout(() => stopAllGlobalBtn.style.opacity = "1", 500);
         });
     }
 }
@@ -320,9 +314,7 @@ window.handleAction = (id, type) => {
     } else if (type === 'paynow') {
         socket.emit("profile-paynow", { profileId: id, retrySettings });
     } else if (type === 'reset') {
-        if (confirm("Reset all session variables for this profile?")) {
-            socket.emit("profile-reset", id);
-        }
+        socket.emit("profile-reset", id);
     }
 };
 
@@ -485,15 +477,44 @@ socket.on("profile-log", (data) => {
     if (currentLogProfileId == data.profileId) {
         const body = $("log-body");
         if (body) {
-            const div = document.createElement("div");
-            div.style.color = data.color || "#10b981";
-            div.style.marginBottom = "2px";
-            div.innerText = `[${data.time}] ${data.msg}`;
-            body.appendChild(div);
+            const container = document.createElement("div");
+            container.className = "log-entry";
+
+            const text = document.createElement("div");
+            text.style.color = data.color || "#10b981";
+            text.innerText = `[${data.time}] ${data.msg}`;
+            container.appendChild(text);
+
+            if (data.json) {
+                const btn = document.createElement("button");
+                btn.className = "log-json-btn";
+                btn.innerText = "JSON";
+                btn.onclick = () => showJsonLog(data.json);
+                container.appendChild(btn);
+            }
+
+            body.appendChild(container);
             body.scrollTop = body.scrollHeight;
         }
     }
 });
+
+window.showJsonLog = (json) => {
+    const display = $("json-display");
+    if (display) {
+        display.innerText = JSON.stringify(json, null, 2);
+        openModal("modal-json");
+    }
+};
+
+window.copyJson = () => {
+    const text = $("json-display")?.innerText;
+    if (text) {
+        navigator.clipboard.writeText(text).then(() => {
+            alert("Copied to clipboard!");
+        });
+    }
+};
 
 socket.on("profile-log-clear", (profileId) => {
     if (currentLogProfileId == profileId) {

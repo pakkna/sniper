@@ -251,6 +251,41 @@
             text-align: center;
             box-shadow: 0 50px 100px rgba(0,0,0,0.5);
         }
+        .log-entry {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2px;
+            padding: 2px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+        }
+        .log-json-btn {
+            background: rgba(59, 130, 246, 0.1);
+            color: var(--accent-blue);
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            border-radius: 4px;
+            padding: 1px 6px;
+            font-size: 9px;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .log-json-btn:hover {
+            background: var(--accent-blue);
+            color: white;
+        }
+        .json-pre {
+            background: #020617;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            overflow: auto;
+            max-height: 400px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: #60a5fa;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
     </style>
 </head>
 <body>
@@ -444,6 +479,19 @@
             <p style="color: var(--text-secondary); margin-bottom: 20px;">Task: <span id="success-task-name" style="color: var(--text-primary); font-weight: 700;"></span></p>
             <div style="display: flex; flex-direction: column; gap: 10px;">
                 <button class="btn btn-primary" onclick="closeModal('modal-success')" style="width: 100%; justify-content: center; font-size: 16px; padding: 12px;">OK, CLOSE</button>
+            </div>
+        </div>
+    </div>
+    <!-- MODAL: JSON VIEWER -->
+    <div id="modal-json" class="modal-overlay">
+        <div class="modal-content" style="width: 500px;">
+            <div class="modal-header">
+                <h3 class="modal-title">Response JSON</h3>
+                <button class="btn-ghost" style="border:none; font-size: 20px;" onclick="closeModal('modal-json')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="json-display" class="json-pre"></div>
+                <button class="btn btn-ghost" style="margin-top: 10px; justify-content: center;" onclick="copyJson()">Copy to Clipboard</button>
             </div>
         </div>
     </div>
