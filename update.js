@@ -12,7 +12,7 @@ console.log("------- [ SYSTEM UPDATE START ]  -------");
 
 try {
     const absolutePath = pathModule.isAbsolute(path) ? path : pathModule.resolve(path);
-    const output = execSync("git pull origin main", { 
+    const output = execSync("git pull origin multi", { 
         cwd: absolutePath, 
         encoding: "utf8",
         stdio: "pipe" 
