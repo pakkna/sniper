@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { execSync, spawn } from "child_process";
 import express from "express";
 import fs from "fs";
 import { gotScraping } from "got-scraping";
@@ -20,12 +20,128 @@ const io = new Server(server, { cors: { origin: "*" } });
 app.use(express.static(path.join(__dirname, "public")));
 app.use(express.json());
 
-let panelConfig = { user: "admin", pass: "admin123", ip: "0.0.0.0", port: 5000, main_ip: "", additional_ips: [], saved_mobile: "", saved_email: "", saved_password: "", capInfo: { type: null, key: null } };
+let panelConfig = { 
+    user: "admin", 
+    pass: "admin123", 
+    ip: "0.0.0.0", 
+    port: 5000, 
+    main_ip: "", 
+    additional_ips: [], 
+    saved_mobile: "", 
+    saved_email: "", 
+    saved_password: "", 
+    capInfo: { type: null, key: null },
+    profiles: [] 
+};
 try {
     const cf = fs.readFileSync(path.join(__dirname, "config.json"), "utf8");
     panelConfig = { ...panelConfig, ...JSON.parse(cf) };
 } catch (e) {
     fs.writeFileSync(path.join(__dirname, "config.json"), JSON.stringify(panelConfig, null, 2));
+}
+
+// ==========================================
+// MULTI-PROFILE STATE ENGINE
+// ==========================================
+const profileStates = new Map();
+
+// Initialize profiles from config
+if (panelConfig.profiles && Array.isArray(panelConfig.profiles)) {
+    panelConfig.profiles.forEach(p => {
+        profileStates.set(p.id, createProfileState(p));
+    });
+}
+
+function createProfileState(data) {
+    const id = data.id || Math.random().toString(36).substring(2, 10);
+    return {
+        id,
+        taskName: data.taskName || "Task-" + id,
+        email: data.email || "",
+        mobile: data.mobile || "",
+        password: data.password || "",
+        authStorage: {
+            state: { 
+                token: null, userId: null, expiresAt: 899,
+                isAuthenticated: false, isVerified: false,
+                requestId: null, phone: data.mobile || null, 
+                password: data.password || null, otpSentAt: null 
+            },
+            version: 0
+        },
+        workerCounts: { sendOtp: 0, verifyOtp: 0, reserveSlot: 0, payNow: 0 },
+        flags: {
+            isOtpVerifyAggressive: false,
+            isReserveStarted: false,
+            isReserveOtpSend: false,
+            globalOtpVerified: false,
+            pollingOtp: false,
+            lastGetOtp: []
+        },
+        PRE_FETCHED_OTP: null,
+        status: { msg: "Idle", type: "info", time: null },
+        steps: { signin: 'idle', verify: 'idle', reserve: 'idle', pay: 'idle' },
+        verifiedAt: null,
+        paymentUrl: null
+    };
+}
+
+function resetProfileState(pState) {
+    const fresh = createProfileState({
+        id: pState.id,
+        taskName: pState.taskName,
+        email: pState.email,
+        mobile: pState.mobile,
+        password: pState.password
+    });
+    Object.assign(pState, fresh);
+    return pState;
+}
+
+function logProfile(pState, msg, color = "#fff", json = null) {
+    const now = new Date();
+    const bdNow = new Date(now.getTime() + 6 * 60 * 60 * 1000);
+    const timeStr = `${String(bdNow.getUTCHours()).padStart(2, "0")}:${String(bdNow.getUTCMinutes()).padStart(2, "0")}:${String(bdNow.getUTCSeconds()).padStart(2, "0")}`;
+    const logMsg = `[${timeStr}] ${msg}`;
+    
+    // 1. File Logging
+    try {
+        const logsDir = path.join(__dirname, "logs");
+        if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir);
+        const logFile = path.join(logsDir, `${pState.id}.log`);
+        fs.appendFileSync(logFile, logMsg + "\n");
+    } catch (e) {}
+
+    // 2. Broadcast to UI
+    const type = (color === "#dc2626" || color === "#ef4444") ? "error" : (color === "#16a34a" || color === "#10b981" ? "success" : "info");
+    
+    io.emit("profile-status", {
+        profileId: pState.id,
+        msg,
+        type,
+        time: timeStr,
+        steps: pState.steps,
+        verifiedAt: pState.verifiedAt
+    });
+
+    io.emit("profile-log", {
+        profileId: pState.id,
+        msg,
+        color,
+        time: timeStr
+    });
+    
+    // 3. UI Row Update
+    pState.status.msg = msg;
+    pState.status.time = timeStr;
+    pState.status.type = type;
+
+    if (pState.paymentUrl) {
+        io.emit("payment-link", {
+            profileId: pState.id,
+            url: pState.paymentUrl
+        });
+    }
 }
 
 // SECURE SESSION CONFIG
@@ -289,13 +405,11 @@ function reloadDnsConfig() {
 // ==========================================
 const RootUrl = "https://api.ivacbd.com";
 
-let UI_SOCKET = null;
-
-const showStatus = (msg, type = "info") => UI_SOCKET?.emit("status", { msg, type });
+const showStatus = (msg, type = "info") => io.emit("status", { msg, type });
 const logSolver = (msg, color = "#fff", json = null) => {
-    UI_SOCKET?.emit("solver-log", { msg, color, json });
+    io.emit("solver-log", { msg, color, json, time: new Date().toLocaleTimeString() });
 };
-const finishBtn = (id, text, stepStatus, activeStep) => UI_SOCKET?.emit("btn-reset", { id, text, stepStatus, activeStep: activeStep || id });
+const finishBtn = (id, text, stepStatus, activeStep) => io.emit("btn-reset", { id, text, stepStatus, activeStep: activeStep || id });
 
 // Node.js Task Manager mimicking their logic
 const TaskManager = {
@@ -329,14 +443,28 @@ const TaskManager = {
         this.tasks[taskName].timeouts.add(id);
         return id;
     }
-};
+};// SHARED ACROSS ALL PROFILES
+let global403PauseUntil = 0;
+let solversInProgress = 0;
+let preSolvedTokens = [];
+const CAPTCHA_TTL = 120000;
+
+const TRANSIT_SITE_KEY = "0x4AAAAAACghKkJHL1t7UkuZ";
+const SITE_URL = "https://appointment.ivacbd.com";
+let CapInfo = panelConfig.capInfo || { type: null, key: null };
+
+// STARTUP: Load saved profiles
+if (Array.isArray(panelConfig.profiles)) {
+    panelConfig.profiles.forEach(p => {
+        profileStates.set(p.id, createProfileState(p));
+    });
+}
 
 let sendOtpWorkerCount = 0;
 let verifyOtpWorkerCount = 0;
 let reserveSlotWorkerCount = 0;
 let payNowWorkerCount = 0;
 
-let global403PauseUntil = 0;
 let sendOtp403Count = 0;
 let lastSendOtp403Time = 0;
 let verifyOtp403Count = 0;
@@ -351,9 +479,6 @@ let globalOtpVerified = false;
 
 let pollingOtp = false;
 let lastGetOtp = [];
-
-let solversInProgress = 0;
-const CAPTCHA_TTL = 120000;
 
 // Auth Store
 let authStorage = {
@@ -372,17 +497,21 @@ let authStorage = {
 };
 const getAuthToken = () => authStorage.state.token;
 
-let CapInfo = panelConfig.capInfo || { type: null, key: null };
-const TRANSIT_SITE_KEY = "0x4AAAAAACghKkJHL1t7UkuZ";
-const SITE_URL = "https://appointment.ivacbd.com";
-
-async function startWorkerCapMonoster(id, signal) {
+async function startWorkerCapMonster(id, signal, pState = null) {
     const API = "https://api.capmonster.cloud";
+    const log = (m, c) => {
+        if (pState) {
+            logProfile(pState, `[Captcha] ${m}`, c);
+        } else {
+            logSolver(`[W#${id}] ${m}`, c);
+        }
+    };
+
     let attempts = 0;
     while (!signal?.aborted && attempts < 3) {
         attempts++;
         try {
-            if (signal?.aborted) return null;
+            log(`CapMonster Creating Task...`, "#3b82f6");
             const create = await gotScraping.post(`${API}/createTask`, {
                 json: {
                     clientKey: CapInfo.key,
@@ -393,12 +522,12 @@ async function startWorkerCapMonoster(id, signal) {
             const { taskId, errorId, errorDescription } = create.body;
             if (errorId !== 0) throw new Error(errorDescription || "Create Task Failed");
             let pollCount = 0;
-            const POLL_LIMIT = 30; // Increased limit
+            const POLL_LIMIT = 30;
             while (!signal?.aborted) {
                 pollCount++;
                 if (pollCount > POLL_LIMIT) {
-                    logSolver(`[Worker #${id}] CapMonster Polling limit reached. Retrying task...`, "#f59e0b");
-                    break; // break inner poll loop to recreate task
+                    log(`Polling limit reached.`, "#f59e0b");
+                    break;
                 }
                 await new Promise(r => setTimeout(r, 800));
                 if (signal?.aborted) return null;
@@ -409,25 +538,36 @@ async function startWorkerCapMonoster(id, signal) {
                 });
                 const result = check.body;
                 if (result.errorId && result.errorId !== 0) throw new Error(result.errorDescription || "Task failed");
-                if (result.status === "ready" && result.solution?.token) return result.solution.token;
+                if (result.status === "ready" && result.solution?.token) {
+                    log(`Solved Successfully!`, "#10b981");
+                    return result.solution.token;
+                }
                 if (result.status === "failed") throw new Error("Task failed");
             }
         } catch (err) {
             if (err.name === "AbortError") return null;
-            logSolver(`CapMonster Worker ${id} (Attempt ${attempts}) Failed: ${err.message}. Retrying...`, "#eab308");
+            log(`Attempt ${attempts} Failed: ${err.message}`, "#f59e0b");
             await new Promise(r => setTimeout(r, 2000));
         }
     }
     return null;
 }
 
-async function startWorkerCapSolver(id, signal) {
+async function startWorkerCapSolver(id, signal, pState = null) {
     const API = "https://api.capsolver.com";
+    const log = (m, c) => {
+        if (pState) {
+            logProfile(pState, `[Captcha] ${m}`, c);
+        } else {
+            logSolver(`[W#${id}] ${m}`, c);
+        }
+    };
+
     let attempts = 0;
     while (!signal?.aborted && attempts < 3) {
         attempts++;
         try {
-            if (signal?.aborted) return null;
+            log(`CapSolver Creating Task...`, "#3b82f6");
             const create = await gotScraping.post(`${API}/createTask`, {
                 json: {
                     clientKey: CapInfo.key,
@@ -455,87 +595,91 @@ async function startWorkerCapSolver(id, signal) {
                 });
                 const result = check.body;
                 if (result.errorId && result.errorId !== 0) throw new Error(result.errorDescription || "Task failed");
-                if (result.status === "ready" && result.solution?.token) return result.solution.token;
+                if (result.status === "ready" && result.solution?.token) {
+                    log(`Captcha Solved!`, "#10b981");
+                    return result.solution.token;
+                }
                 if (result.status === "failed") throw new Error("Task failed");
             }
         } catch (err) {
             if (err.name === "AbortError") return null;
-            logSolver(`CapSolver Worker ${id} (Attempt ${attempts}) Failed: ${err.message}. Retrying...`, "#ef4444");
+            log(`Attempt ${attempts} Failed: ${err.message}`, "#ef4444");
             await new Promise(r => setTimeout(r, 2000));
         }
     }
     return null;
 }
 
-let preSolvedTokens = [];
-let PRE_FETCHED_OTP = null;
-
 async function queueToken(force = false) {
     if (!force && (preSolvedTokens.length + solversInProgress >= 1)) return false;
-    UI_SOCKET?.emit("btn-reset", { id: "solver", text: "Solving API..." });
+    io.emit("btn-reset", { id: "solver", text: "Solving API..." });
     const token = await __solveAggressive();
     if (token) {
         preSolvedTokens.push({ token, time: Date.now() });
-        UI_SOCKET?.emit("btn-reset", { id: "solver", text: `🧩 Solver (${preSolvedTokens.length})` });
+        io.emit("btn-reset", { id: "solver", text: `🧩 Solver (${preSolvedTokens.length})` });
         return true;
     } else {
-        UI_SOCKET?.emit("btn-reset", { id: "solver", text: preSolvedTokens.length > 0 ? `🧩 Solver (${preSolvedTokens.length})` : "🧩 Solver" });
+        io.emit("btn-reset", { id: "solver", text: preSolvedTokens.length > 0 ? `🧩 Solver (${preSolvedTokens.length})` : "🧩 Solver" });
     }
     return false;
 }
 
-async function solveAggressive() {
+async function solveAggressive(pState = null) {
     // 1. Check pool
     while (preSolvedTokens.length > 0) {
         const item = preSolvedTokens.shift();
         if (Date.now() - item.time <= 80000) {
-            UI_SOCKET?.emit("btn-reset", { id: "solver", text: preSolvedTokens.length > 0 ? `🧩 Solver (${preSolvedTokens.length})` : "🧩 Solver" });
+            io.emit("btn-reset", { id: "solver", text: preSolvedTokens.length > 0 ? `🧩 Solver (${preSolvedTokens.length})` : "🧩 Solver" });
+            if (pState) logProfile(pState, "Using pre-solved token from pool.", "#10b981");
             return { token: item.token, time: item.time };
         }
     }
-
-    const t = await __solveAggressive();
+    const t = await __solveAggressive(pState);
     if (t) return { token: t, time: Date.now() };
     return null;
 }
 
-async function __solveAggressive() {
+async function __solveAggressive(pState = null) {
     if (!CapInfo?.type || !CapInfo?.key) {
-        logSolver("No Cap API keys set! Auto solve disabled.", "#dc2626");
+        const err = "No Cap API keys set! Auto solve disabled.";
+        logSolver(err, "#dc2626");
+        if (pState) logProfile(pState, err, "#ef4444");
         return null;
     }
     
     solversInProgress++;
-    logSolver("🧩 API Captcha Solving...", "#3b82f6");
+    const msg = "🧩 Requesting Captcha Solve...";
+    if (pState) logProfile(pState, msg, "#3b82f6");
+    else logSolver(msg, "#3b82f6");
     
     const taskName = "captchaSolver";
     const controller = TaskManager.start(taskName);
     const { signal } = controller;
     
-    // Safety timeout: Abort if not solved in 90s
     const safetyTimeout = setTimeout(() => {
         controller.abort();
-        logSolver("⚠️ API Captcha Solver Timeout!", "#ef4444");
     }, 90000);
 
     let workerPromises = [];
-    if (CapInfo.type === "capSolver") {
-        workerPromises.push(startWorkerCapSolver(1, signal));
+    if (CapInfo.type === "capsolver") {
+        workerPromises.push(startWorkerCapSolver(1, signal, pState));
     } else {
-        workerPromises.push(startWorkerCapMonoster(1, signal));
+        workerPromises.push(startWorkerCapMonster(1, signal, pState));
     }
     
     try {
         const token = await Promise.any(workerPromises.filter(p => p !== null));
         if (token && !signal.aborted) {
-            logSolver(`🧩 API Token Solved.`, "#10b981");
             return token;
         }
     } catch (e) {
-        if (!signal.aborted) logSolver(`⚠️ API Captcha Solve Failed`, "#ef4444");
+        if (!signal.aborted) {
+            logSolver(`⚠️ Captcha Solve Failed`, "#ef4444");
+            if (pState) logProfile(pState, "Captcha Solve Failed", "#ef4444");
+        }
     } finally {
         clearTimeout(safetyTimeout);
-        controller.abort(); // Ensure everything is stopped
+        controller.abort();
         solversInProgress--;
         TaskManager.removeController(taskName, controller);
     }
@@ -546,19 +690,18 @@ async function __solveAggressive() {
 // PORTED FUNCTIONS
 // ==========================================
 
-async function getOtpOnce(taskName, mobile) {
-    if (!mobile) { showStatus("Enter Mobile Number", "error"); return false; }
+async function getOtpOnce(pState) {
+    if (!pState.mobile) return false;
+    const taskName = `GetOtpOnce-${pState.id}`;
     const controller = TaskManager.start(taskName);
     try {
-        const res = await gotScraping(`https://sms.mrshuvo.xyz/ivac/${mobile}`, { signal: controller.signal, responseType: "json" });
+        const res = await gotScraping(`https://sms.mrshuvo.xyz/ivac/${pState.mobile}`, { signal: controller.signal, responseType: "json" });
         const data = res.body;
         const otp = data?.data?.otp;
-        if (data?.success && otp && otp !== "Invalid" && otp.length === 6 && !lastGetOtp.includes(otp)) {
-            PRE_FETCHED_OTP = otp;
-            UI_SOCKET?.emit("set-otp-value", otp);
-            lastGetOtp.push(otp);
-            showStatus("OTP Found & Stored backend", "success");
-            logSolver(`Reserveotp OTP stored: ${otp}`, "#16a34a", data);
+        if (data?.success && otp && otp !== "Invalid" && otp.length === 6 && !pState.flags.lastGetOtp.includes(otp)) {
+            pState.PRE_FETCHED_OTP = otp;
+            pState.flags.lastGetOtp.push(otp);
+            logProfile(pState, `OTP Found & Stored backend: ${otp}`, "#16a34a", data);
             TaskManager.removeController(taskName, controller);
             return otp;
         }
@@ -567,91 +710,72 @@ async function getOtpOnce(taskName, mobile) {
     } catch (err) {
         TaskManager.removeController(taskName, controller);
         if (err.name === "AbortError") return false;
-        showStatus("Failed to get OTP", "error");
+        logProfile(pState, "Failed to fetch OTP from SMS API", "#ef4444");
         return false;
     }
 }
 
-async function pollOtpLoop(mobile, __IVAC_RETRY__, isManual = false) {
-    const taskName = "GetOtp";
+async function pollOtpLoop(pState, retrySettings, isManual = false) {
+    const taskName = `GetOtp-${pState.id}`;
     const maxTries = 20;
 
-    if (pollingOtp) {
+    if (pState.flags.pollingOtp) {
         if (isManual) {
-            pollingOtp = false;
+            pState.flags.pollingOtp = false;
             TaskManager.stopTask(taskName);
-            finishBtn("getOtp", "Get OTP", "none");
-            showStatus("Stopped searching OTP", "info");
+            logProfile(pState, "Stopped searching OTP", "#64748b");
         }
         return;
     }
 
-    pollingOtp = true;
-    finishBtn("getOtp", "Searching...");
-    showStatus("Searching OTP...", "info");
-    if (isManual) logSolver("Searcing Reserveotp...");
-    else logSolver("Auto Searching OTP...");
+    pState.flags.pollingOtp = true;
+    logProfile(pState, "Searching OTP...", "#3b82f6");
 
     let attempts = 0;
 
     const tryFetch = async () => {
-        if (!pollingOtp) return;
+        if (!pState.flags.pollingOtp) return;
         attempts++;
         if (attempts > maxTries) {
-            pollingOtp = false;
-            finishBtn("getOtp", "GET OTP", "none");
-            showStatus(`OTP not found after ${maxTries} attempts`, "error");
-            logSolver(`App OTP Not Found 20/20`, '#a85ee9');
+            pState.flags.pollingOtp = false;
+            logProfile(pState, `OTP not found after ${maxTries} attempts`, "#ef4444");
             return;
         }
 
-        const foundOtp = await getOtpOnce(taskName, mobile);
+        const foundOtp = await getOtpOnce(pState);
         if (foundOtp) {
-            pollingOtp = false;
-            finishBtn("getOtp", "GET OTP", "none");
-            
-            if (isReserveOtpSend) {
-                // Scenario A: Pre-warmup (Auto Hit) -> Find and STOP
-                PRE_FETCHED_OTP = foundOtp;
-                logSolver(`${isManual ? "[Manual]" : "[Auto]"} Reserve OTP Found: ${foundOtp}`, "#10b981");
-            } else if (__IVAC_RETRY__?.enabled) {
-                // Scenario B: Active verification (Manual or Fallback) -> VERIFY
-                const otpToUse = PRE_FETCHED_OTP || foundOtp;
-                PRE_FETCHED_OTP = null;
-                logSolver(`OTP Found: ${otpToUse}.try to verify`, "#b057ff");
-                verifyOtpAggressive(mobile, otpToUse, __IVAC_RETRY__);
+            pState.flags.pollingOtp = false;
+            if (pState.flags.isReserveOtpSend) {
+                pState.PRE_FETCHED_OTP = foundOtp;
+                logProfile(pState, `Reserve OTP Found: ${foundOtp}`, "#10b981");
+            } else if (retrySettings?.enabled) {
+                const otpToUse = pState.PRE_FETCHED_OTP || foundOtp;
+                pState.PRE_FETCHED_OTP = null;
+                logProfile(pState, `OTP Found: ${otpToUse}. Verifying...`, "#b057ff");
+                verifyOtpAggressive(pState, otpToUse, retrySettings);
             } else {
-                PRE_FETCHED_OTP = foundOtp;
+                pState.PRE_FETCHED_OTP = foundOtp;
             }
             return;
         }
 
-        if (pollingOtp && attempts < maxTries) {
-            showStatus(`Searching OTP. Attempt ${attempts}...`, "info");
-            TaskManager.setTimeout(taskName, tryFetch, 800);
+        if (pState.flags.pollingOtp && attempts < maxTries) {
+            TaskManager.setTimeout(taskName, tryFetch, 1000);
         } else {
-            pollingOtp = false;
-            finishBtn("getOtp", "GET OTP", "none");
-            showStatus(`OTP not found after ${maxTries} attempts`, "error");
-            logSolver(`App OTP Not Found 20/20`, '#a85ee9');
+            pState.flags.pollingOtp = false;
+            logProfile(pState, `OTP not found after ${maxTries} attempts`, "#ef4444");
         }
     };
     tryFetch();
 }
 
-async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
-    finishBtn("reserveOtp", "Sending...");
-    showStatus("Sending OTP...", "info");
+async function reserveOtp(pState, retrySettings, isPreWarmup = false) {
+    logProfile(pState, "Initiating Reserve OTP...", "#3b82f6");
 
-    sendOtpWorkerCount++;
-    const workerId = sendOtpWorkerCount;
-    const taskName = `ReserveOtp-${workerId}`;
+    pState.workerCounts.sendOtp++;
+    const workerId = pState.workerCounts.sendOtp;
+    const taskName = `ReserveOtp-${pState.id}-${workerId}`;
     const controller = TaskManager.start(taskName);
-
-    if (!email) {
-        TaskManager.stopTask(taskName);
-        return showStatus("Email required", "error");
-    }
 
     const trySend = async (workerId, oldTokenToUse = null, oldTokenTime = null) => {
         if (controller.signal.aborted) return;
@@ -661,7 +785,6 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
         }
 
         const wTag = `[W-${workerId}|${getNetworkTitle(workerId)}]`;
-        logSolver(`${wTag} ReserveOTP Started`, "#3b82f6");
         try {
             let tokenToUse;
             let tokenTime;
@@ -669,13 +792,13 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
                 tokenToUse = oldTokenToUse;
                 tokenTime = oldTokenTime;
             } else {
-                const solveRes = await solveAggressive();
-                if (!solveRes) { finishBtn("reserveOtp", "Reserve OTP"); return showStatus("Captcha failed", "error"); }
+                const solveRes = await solveAggressive(pState);
+                if (!solveRes) { logProfile(pState, "Captcha failed", "#ef4444"); return; }
                 tokenToUse = solveRes.token;
                 tokenTime = solveRes.time;
             }
 
-            const payload = { email, "otpChannel": "PHONE", captchaToken: tokenToUse };
+            const payload = { email: pState.email, "otpChannel": "PHONE", captchaToken: tokenToUse };
             const reqStart = Date.now();
             const res = await getGotClient(`ReserveOTP-W${workerId}`, workerId).post(`${RootUrl}/iams/api/v1/forgot-password/sendOtp`, {
                 json: payload, responseType: "json", signal: controller.signal,
@@ -687,135 +810,59 @@ async function reserveOtp(email,mobile, __IVAC_RETRY__, isPreWarmup = false) {
 
             if (res.statusCode === 200 && data?.successFlag) {
                 TaskManager.stopTask(taskName);
-                finishBtn("reserveOtp", "Reserve OTP", "done");
-                showStatus(`ReserveOtp Send Successfully`, "success");
-                logSolver(`${wTag} ReserveOtp Send Success`, '#16a34a', data);
+                logProfile(pState, `ReserveOtp Send Success`, "#10b981", data);
 
-                sendOtpWorkerCount = 0;
-                authStorage.state.requestId = data.data?.requestId;
-                authStorage.state.phone = mobile;
-                authStorage.state.email = email;
-                authStorage.state.otpSentAt = Date.now();
-                isReserveOtpSend = isPreWarmup;
-                TaskManager.setTimeout('GetOtp', () => pollOtpLoop(mobile, __IVAC_RETRY__), 1000);
+                pState.workerCounts.sendOtp = 0;
+                pState.authStorage.state.requestId = data.data?.requestId;
+                pState.authStorage.state.otpSentAt = Date.now();
+                pState.flags.isReserveOtpSend = isPreWarmup;
                 
+                TaskManager.setTimeout(`GetOtp-${pState.id}`, () => pollOtpLoop(pState, retrySettings), 1000);
                 return;
             }
 
             if (res.statusCode !== 200) {
-                
-                if (!__IVAC_RETRY__?.enabled) {
+                if (!retrySettings?.enabled) {
                     TaskManager.removeController(taskName, controller);
-                    finishBtn("reserveOtp", "Reserve OTP");
-                    if (res.statusCode === 403 || res.statusCode === 502 || res.statusCode === 504) {
-                        logSolver(`${wTag} Reserve OTP Status [${res.statusCode}]`, '#d55252');
-                    } else {
-                        logSolver(`${wTag} Reserve OTP Status [${res.statusCode}]`, '#d55252', data);
-                    }
-                    return showStatus(data?.message || data?.error || "Failed", "error");
+                    logProfile(pState, `ReserveOtp Status [${res.statusCode}]`, "#ef4444", data);
+                    return;
                 }
-                let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
                 
-                if (res.statusCode === 403) {
-                    if (Date.now() - lastSendOtp403Time > 10000) sendOtp403Count = 0;
-                    sendOtp403Count++;
-                    lastSendOtp403Time = Date.now();
-                    if (sendOtp403Count >= sendOtpWorkerCount && sendOtpWorkerCount > 0) {
-                        global403PauseUntil = Date.now() + waitMs;
-                        logSolver(`[Cloud Rate Limit] All workers faced 403! Pausing ALL requests for ${waitMs/1000}s`, '#d55252');
-                        sendOtp403Count = 0;
-                    }
-                }
+                let waitMs = (retrySettings.seconds || 5) * 1000;
+                if (res.statusCode === 403 || res.statusCode === 503) waitMs = 2500 + Math.floor(Math.random() * 501);
+                else if (res.statusCode === 429) waitMs = 20000;
+                else if ([500, 501, 502, 504].includes(res.statusCode)) waitMs = 1500 + Math.floor(Math.random() * 500);
 
-                if (res.statusCode === 403 || res.statusCode === 503) {
-                    waitMs = 2500 + Math.floor(Math.random() * 501); 
-                } else if (res.statusCode === 429) {
-                    waitMs = 20000;
-                } else if ([500, 501, 502, 504, 520].includes(res.statusCode)) {
-                    waitMs = 1500 + Math.floor(Math.random() * 500); 
-                } else if ([400, 401].includes(res.statusCode)) { waitMs = 1000; }
+                const isTokenFresh = (Date.now() - tokenTime) <= 40000;
+                const canReuse = isTokenFresh && (res.statusCode === 403 || reqDuration < 3000);
+                const tokenForRetry = canReuse ? tokenToUse : null;
+                const timeForRetry = tokenForRetry ? tokenTime : null;
                 
-                if (res.statusCode === 403 || res.statusCode === 502 || res.statusCode === 504) {
-                    logSolver(`${wTag} ReserveOTP Status [${res.statusCode}]`, '#d55252');
-                } else {
-                    logSolver(`${wTag} ReserveOTP Status [${res.statusCode}]`, '#d55252', data);
-                }
-
-                if ([403, 503, 502, 504].includes(res.statusCode)) {
-                    // 403 → CF rate-limit, never reached origin → ALWAYS reuse until TTL
-                    // 502/503/504 < 3s → ALB dropped early, token untouched → reuse
-                    // 502/503/504 ≥ 3s → server may have processed it → fresh token
-                    const isTokenFresh = (Date.now() - tokenTime) <= 40000;
-                    const canReuse = isTokenFresh && (res.statusCode === 403 || reqDuration < 3000);
-                    const tokenForRetry = canReuse ? tokenToUse : null;
-                    const timeForRetry = tokenForRetry ? tokenTime : null;
-                    logSolver(`${wTag} ReserveOTP Next Hit ${(waitMs/1000).toFixed(2)}s [Token: ${tokenForRetry ? 'REUSE' : 'NEW'}]`);
-                    return TaskManager.setTimeout(taskName, () => trySend(workerId, tokenForRetry, timeForRetry), waitMs);
-                } else {
-                    return TaskManager.setTimeout(taskName, () => trySend(workerId), waitMs);
-                }
+                logProfile(pState, `ReserveOtp Retry [${res.statusCode}] in ${(waitMs/1000).toFixed(1)}s`, "#eab308");
+                return TaskManager.setTimeout(taskName, () => trySend(workerId, tokenForRetry, timeForRetry), waitMs);
             }
-
-            finishBtn("reserveOtp", "Reserve OTP");
-            TaskManager.removeController(taskName, controller);
         } catch (err) {
             if (err.name === "AbortError") return;
-            TaskManager.removeController(taskName, controller);
-            if (__IVAC_RETRY__?.enabled) {
-                // Network error → request NEVER reached server → token NEVER consumed
-                // Reuse same token until it fully expires (CAPTCHA_TTL = 120s)
-                const wait = 1000;
-                const isTokenAlive = tokenToUse && tokenTime && (Date.now() - tokenTime) < CAPTCHA_TTL;
-                const tokenForRetry = isTokenAlive ? tokenToUse : null;
-                const timeForRetry = tokenForRetry ? tokenTime : null;
-                logSolver(`${wTag} ReserveOTP Network Error [Token: ${tokenForRetry ? 'REUSE' : 'NEW'}]`, '#d55252');
-                return TaskManager.setTimeout(taskName, () => trySend(workerId, tokenForRetry, timeForRetry), wait);
-            } else {
-                logSolver(`${wTag} Send OTP Network Error: ${err.message}`, '#d55252');
-                finishBtn("reserveOtp", "Reserve OTP", "none");
-                showStatus("Reserve OTP Failed: " + err.message, "error");
-                TaskManager.stopTask(taskName);
-            }
+            const wait = 1000;
+            const isTokenAlive = tokenToUse && tokenTime && (Date.now() - tokenTime) < CAPTCHA_TTL;
+            const tokenForRetry = isTokenAlive ? tokenToUse : null;
+            logProfile(pState, `ReserveOtp Net Error. Reusing Token: ${!!tokenForRetry}`, "#ef4444");
+            return TaskManager.setTimeout(taskName, () => trySend(workerId, tokenForRetry, tokenTime), wait);
         }
     };
-    
-    const numWorkers = 1;
-    for (let i = 1; i <= numWorkers; i++) {
-        trySend(i);
-    }
+    trySend(workerId);
 }
 
 
-async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue, isManual = false, batchTokens = null) {
-    finishBtn("sendOtp", "Sending...");
-    showStatus("Sending OTP...", "info");
-
-    if (!isReserveOtpSend) {
-        if (oldOtpBoxValue && oldOtpBoxValue !== "Invalid" && oldOtpBoxValue.length === 6 && !lastGetOtp.includes(oldOtpBoxValue)) {
-            lastGetOtp.push(oldOtpBoxValue);
-            logSolver(`[Setup] Ignored box OTP: ${oldOtpBoxValue}`, "#6b7280");
-        }
-        gotScraping(`https://sms.mrshuvo.xyz/ivac/${mobile}`, { responseType: "json" })
-            .then(tempRes => {
-                const apiOtp = tempRes.body?.data?.otp;
-                if (apiOtp && apiOtp !== "Invalid" && apiOtp.length === 6 && !lastGetOtp.includes(apiOtp)) {
-                    lastGetOtp.push(apiOtp);
-                    logSolver(`[Setup] Ignored previous API OTP: ${apiOtp}`, "#6b7280");
-                }
-            }).catch(() => {});
-    }
-
-    sendOtpWorkerCount++;
-    const taskName = `sendOtp`;
-    
-    if (!mobile || !mbpassword) {
-        return showStatus("Phone & Password required", "error");
-    }
+async function sendOtp(pState, retrySettings, oldOtpBoxValue = null, isManual = false, batchTokens = null) {
+    pState.steps.signin = 'active';
+    const taskName = `SendOtp-${pState.id}`;
+    logProfile(pState, "Initiating Send OTP...", "#3b82f6");
 
     let successTriggered = false;
     let activeCount = 0;
     let batchFailed = 0;
-    let sendOtpBatchTokenMap = []; // per-worker token decisions for batch retry
+    let sendOtpBatchTokenMap = [];
 
     const trySend = async (id, delay = 0, oldTokenToUse = null, oldTokenTime = null) => {
         const controller = TaskManager.start(taskName);
@@ -827,27 +874,23 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
         }
 
         const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
-        logSolver(`${wTag} SendOTP Started`, "#3b82f6");
-
         const onFail = (waitMs, reuseToken = null, reuseTokenTime = null) => {
-            if (!__IVAC_RETRY__?.enabled) return;
-            if (__IVAC_RETRY__.logic === "batch" && activeCount > 1) {
-                // Collect this worker's token decision for the next batch round
+            if (!retrySettings?.enabled) return;
+            if (retrySettings.logic === "batch" && activeCount > 1) {
                 sendOtpBatchTokenMap.push({ token: reuseToken, time: reuseTokenTime });
                 batchFailed++;
                 if (batchFailed === activeCount && !successTriggered) {
                     batchFailed = 0;
                     const tokenSnapshot = [...sendOtpBatchTokenMap];
                     sendOtpBatchTokenMap = [];
-                    const reuseCount = tokenSnapshot.filter(t => t.token).length;
-                    const freshCount = tokenSnapshot.filter(t => !t.token).length;
-                    logSolver(`[Batch] All ${activeCount} SendOTP workers failed. Retrying in 1000ms... [Reuse: ${reuseCount} | Fresh: ${freshCount}]`, "#fbbf24");
-                    TaskManager.setTimeout(taskName, () => sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue, false, tokenSnapshot), 1000);
+                    logProfile(pState, `[Batch] All ${activeCount} workers failed. Retrying...`, "#fbbf24");
+                    TaskManager.setTimeout(taskName, () => sendOtp(pState, retrySettings, oldOtpBoxValue, false, tokenSnapshot), 1000);
                 }
             } else {
                 TaskManager.setTimeout(taskName, () => trySend(id, 0, reuseToken, reuseTokenTime), waitMs);
             }
         };
+
         try {
             let tokenToUse;
             let tokenTime;
@@ -855,14 +898,13 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
                 tokenToUse = oldTokenToUse;
                 tokenTime = oldTokenTime;
             } else {
-                const solveRes = await solveAggressive();
-                if (!solveRes) { finishBtn("sendOtp", "Send OTP"); return showStatus("Captcha failed", "error"); }
+                const solveRes = await solveAggressive(pState);
+                if (!solveRes) { logProfile(pState, "Captcha failed", "#ef4444"); return; }
                 tokenToUse = solveRes.token;
                 tokenTime = solveRes.time;
             }
 
-            const payload = { captchaToken: tokenToUse, phone: mobile, password: mbpassword };
-
+            const payload = { captchaToken: tokenToUse, phone: pState.mobile, password: pState.password };
             const reqStart = Date.now();
             const response = await getGotClient(`SendOTP-W${id}`, id).post(`${RootUrl}/iams/api/v1/auth/signin`, {
                 json: payload, responseType: "json", signal: controller.signal,
@@ -875,151 +917,77 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
             if (response.statusCode === 200 && data?.successFlag) {
                 successTriggered = true;
                 TaskManager.stopTask(taskName);
-                finishBtn("sendOtp", "Send OTP", "done");
-                showStatus(`OTP Send Successfully`, "success");
-                logSolver(`${wTag} OTP Send Successfully`, '#16a34a', data);
+                pState.steps.signin = 'done';
+                pState.steps.verify = 'active';
+                logProfile(pState, `Signin successful. Check OTP in Box.`, "#10b981", data);
 
-                isReserveStarted = false;
-                isOtpVerifyAggressive = false;
-                globalOtpVerified = false;
+                pState.flags.isReserveStarted = false;
+                pState.flags.isOtpVerifyAggressive = false;
+                pState.flags.globalOtpVerified = false;
 
-                if (isReserveOtpSend && authStorage.state.requestId) {
-                    authStorage.state.token = data.data?.accessToken;
-                    authStorage.state.userId = data.data?.userId;
-                    authStorage.state.phone = mobile;
-                    authStorage.state.password = mbpassword;
-                    authStorage.state.otpSentAt = Date.now();
-                    
-                    isReserveOtpSend = false;
-                    const boxOtpValid = oldOtpBoxValue && oldOtpBoxValue !== "Invalid" && oldOtpBoxValue.length === 6;
-                    
-                    if (PRE_FETCHED_OTP) {
-                        const otpToUse = PRE_FETCHED_OTP;
-                        PRE_FETCHED_OTP = null; 
-                        verifyOtpAggressive(mobile, otpToUse, __IVAC_RETRY__);
-                    } else if (boxOtpValid) {
-                        verifyOtpAggressive(mobile, oldOtpBoxValue, __IVAC_RETRY__);
-                    } else {
-                        TaskManager.setTimeout('GetOtp', () => pollOtpLoop(mobile, __IVAC_RETRY__), 1000);
-                    }
-
-                return;
-
+                pState.authStorage.state.token = data.data?.accessToken;
+                pState.authStorage.state.userId = data.data?.userId;
+                pState.authStorage.state.requestId = data.data?.requestId;
+                pState.authStorage.state.otpSentAt = Date.now();
+                
+                const boxOtpValid = oldOtpBoxValue && oldOtpBoxValue !== "Invalid" && oldOtpBoxValue.length === 6;
+                
+                if (pState.PRE_FETCHED_OTP) {
+                    const otpToUse = pState.PRE_FETCHED_OTP;
+                    pState.PRE_FETCHED_OTP = null; 
+                    verifyOtpAggressive(pState, otpToUse, retrySettings);
+                } else if (boxOtpValid) {
+                    verifyOtpAggressive(pState, oldOtpBoxValue, retrySettings);
                 } else {
-                    authStorage.state.token = data.data?.accessToken;
-                    authStorage.state.userId = data.data?.userId;
-                    authStorage.state.requestId = data.data?.requestId;
-                    authStorage.state.phone = mobile;
-                    authStorage.state.password = mbpassword;
-                    authStorage.state.otpSentAt = Date.now();
-                    
-                    isReserveOtpSend = false;
-                    
-                    TaskManager.setTimeout('GetOtp', () => pollOtpLoop(mobile, __IVAC_RETRY__), 1000);
-
-                    return;
+                    TaskManager.setTimeout(`GetOtp-${pState.id}`, () => pollOtpLoop(pState, retrySettings), 1000);
                 }
+                return;
             }
 
             if (response.statusCode !== 200) {
-                if (!__IVAC_RETRY__?.enabled) {
+                if (!retrySettings?.enabled) {
                     TaskManager.removeController(taskName, controller);
-                    finishBtn("sendOtp", "Send OTP", "none");
-                    if (response.statusCode === 403 || response.statusCode === 502 || response.statusCode === 504) {
-                        logSolver(`Send OTP [W${id}] Status [${response.statusCode}]`, '#d55252');
-                    } else {
-                        logSolver(`Send OTP [W${id}] Status [${response.statusCode}]`, '#d55252', data);
-                    }
-                    return showStatus(data?.message || data?.error || "Invalid credentials", "error");
+                    logProfile(pState, `Send OTP Status [${response.statusCode}]`, "#ef4444", data);
+                    return;
                 }
                 
-                let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
+                let waitMs = (retrySettings.seconds || 5) * 1000;
+                if (response.statusCode === 403 || response.statusCode === 503) waitMs = 2500 + Math.floor(Math.random() * 501);
+                else if (response.statusCode === 429) waitMs = 20000;
+                else if ([500, 501, 502, 504].includes(response.statusCode)) waitMs = 1500 + Math.floor(Math.random() * 500);
 
-                if (response.statusCode === 403) {
-                    if (Date.now() - lastSendOtp403Time > 10000) sendOtp403Count = 0;
-                    sendOtp403Count++;
-                    lastSendOtp403Time = Date.now();
-                    if (sendOtp403Count >= activeCount && activeCount > 0) {
-                        global403PauseUntil = Date.now() + waitMs;
-                        logSolver(`[Cloud Rate Limit] All workers faced 403! Pausing ALL requests for ${waitMs/1000}s`, '#d55252');
-                        sendOtp403Count = 0;
-                    }
-                }
-
-                if (response.statusCode === 403 || response.statusCode === 503) {
-                    waitMs = 2500 + Math.floor(Math.random() * 501);
-                } else if (response.statusCode === 429) {
-                    waitMs = 20000; // 20s
-                } else if ([500, 501, 502, 504, 520].includes(response.statusCode)) {
-                    waitMs = 1500 + Math.floor(Math.random() * 500);
-                } else if ([400, 401].includes(response.statusCode)) {
-                    waitMs = 1000;
-                }
                 if (response.statusCode === 429) {
-                    TaskManager.stopTask(taskName);
-                    logSolver(`${wTag} SendOTP 429: ${data?.message}`, '#fbbf24');
-                    showStatus(data?.message || "Rate Limited! Searching OTP...", "error");
-                    
-                    if (email && authStorage.state.token) {
-                        reserveOtp(email, mobile, __IVAC_RETRY__, false);
-                    }
+                    logProfile(pState, `SendOTP 429: ${data?.message}. Searching OTP...`, "#fbbf24");
+                    reserveOtp(pState, retrySettings, false);
                     return;
                 }
 
-                if (response.statusCode === 403 || response.statusCode === 502 || response.statusCode === 504) {
-                    logSolver(`${wTag} Send OTP Status [${response.statusCode}]`, '#d55252');
-                } else {
-                    logSolver(`${wTag} Send OTP Status [${response.statusCode}]`, '#d55252', data);
-                }
-
-                if ([403, 503, 502, 504].includes(response.statusCode)) {
-                    // 403 → CF rate-limit, never reached origin → ALWAYS reuse until TTL
-                    // 502/503/504 < 3s → ALB dropped early, token untouched → reuse
-                    // 502/503/504 ≥ 3s → server may have processed it → fresh token
-                    const isTokenFresh = (Date.now() - tokenTime) <= 40000;
-                    const canReuse = isTokenFresh && (response.statusCode === 403 || reqDuration < 3000);
-                    const tokenForRetry = canReuse ? tokenToUse : null;
-                    const timeForRetry = tokenForRetry ? tokenTime : null;
-                    logSolver(`${wTag} SendOTP Next Hit ${(waitMs/1000).toFixed(2)}s [Token: ${tokenForRetry ? 'REUSE' : 'NEW'}]`);
-                    return onFail(waitMs, tokenForRetry, timeForRetry);
-                } else {
-                    return onFail(waitMs);
-                }
+                const isTokenFresh = (Date.now() - tokenTime) <= 40000;
+                const canReuse = isTokenFresh && (response.statusCode === 403 || reqDuration < 3000);
+                const tokenForRetry = canReuse ? tokenToUse : null;
+                const timeForRetry = tokenForRetry ? tokenTime : null;
+                
+                logProfile(pState, `Send OTP Retry [${response.statusCode}] in ${(waitMs/1000).toFixed(1)}s`, "#eab308");
+                return onFail(waitMs, tokenForRetry, tokenTime);
             }
-
-            finishBtn("sendOtp", "Send OTP", "none");
-            TaskManager.removeController(taskName, controller);
         } catch (err) {
             if (err.name === "AbortError") return;
-            TaskManager.removeController(taskName, controller);
-            if (__IVAC_RETRY__?.enabled) {
-                // Network error → request NEVER reached server → token NEVER consumed
-                // Reuse same token until it fully expires (CAPTCHA_TTL = 120s)
-                const isTokenAlive = tokenToUse && tokenTime && (Date.now() - tokenTime) < CAPTCHA_TTL;
-                const tokenForRetry = isTokenAlive ? tokenToUse : null;
-                const timeForRetry = tokenForRetry ? tokenTime : null;
-                logSolver(`${wTag} SendOTP Network Error [Token: ${tokenForRetry ? 'REUSE' : 'NEW'}]`, '#d55252');
-                return onFail(1000, tokenForRetry, timeForRetry);
-            } else {
-                logSolver(`${wTag} Send OTP Network Error: ${err.message}`, '#d55252');
-                finishBtn("sendOtp", "Send OTP", "none");
-                showStatus("Send OTP Failed: " + err.message, "error");
-                TaskManager.stopTask(taskName);
-            }
+            const isTokenAlive = tokenToUse && tokenTime && (Date.now() - tokenTime) < CAPTCHA_TTL;
+            const tokenForRetry = isTokenAlive ? tokenToUse : null;
+            logProfile(pState, `Send OTP Net Error. Reusing Token: ${!!tokenForRetry}`, "#ef4444");
+            return onFail(1000, tokenForRetry, tokenTime);
         }
     };
 
-    let numWorkers = isManual ? 1 : ((__IVAC_RETRY__?.mode > 1) ? parseInt(__IVAC_RETRY__.mode, 10) || 1 : 1);
+    let baseWorkers = isManual ? 1 : ((retrySettings?.mode > 1) ? parseInt(retrySettings.mode, 10) || 1 : 1);
+    let numWorkers = (baseWorkers > 5) ? 5 : baseWorkers; // CAP Send OTP at 5
     activeCount = numWorkers;
 
     if (isManual) {
-        // Button click: fire next worker ID (adds to existing running workers)
-        trySend(sendOtpWorkerCount, 0);
+        trySend(pState.workerCounts.sendOtp + 1, 0);
     } else {
-        // Auto mode: start N workers from ID 1 with stagger
         for (let i = 1; i <= numWorkers; i++) {
             const delay = (i === 1) ? 0 : ((i - 1) * (Math.floor(Math.random() * 201) + 150));
-            // On batch retry, each worker gets its own token decision from previous round
             const batchToken = batchTokens ? (batchTokens[i - 1]?.token || null) : null;
             const batchTokenTime = batchTokens ? (batchTokens[i - 1]?.time || null) : null;
             trySend(i, delay, batchToken, batchTokenTime);
@@ -1027,28 +995,21 @@ async function sendOtp(email, mobile, mbpassword, __IVAC_RETRY__, oldOtpBoxValue
     }
 }
 
-async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false, isManual = false) {
-    const requestId = authStorage?.state?.requestId;
-    const accessToken = authStorage?.state?.token;
+async function verifyOtpAggressive(pState, otp, retrySettings, isAutoRetry = false, isManual = false) {
+    pState.steps.verify = 'active';
+    const taskName = `VerifyOtp-${pState.id}`;
+    const requestId = pState.authStorage.state.requestId;
+    const accessToken = pState.authStorage.state.token;
 
-    if (!otp || !requestId) {
-        TaskManager.stopTask("verifyOtp");
-        finishBtn("verifyOtp", "Verify OTP", "none");
-        logSolver(`[Verify] Failed! Request ID not found.`, "#ef4444");
-        return showStatus("OTP or requestId missing", "error");
-    }
-    if (!accessToken) {
-        TaskManager.stopTask("verifyOtp");
-        finishBtn("verifyOtp", "Verify OTP", "none");
-        logSolver(`[Verify] Failed! access token not found.`, "#ef4444");
-        return showStatus("Missing access token", "error");
+    if (!otp || !requestId || !accessToken) {
+        logProfile(pState, "Verify OTP Failed: Missing Credentials", "#ef4444");
+        return;
     }
 
-    finishBtn("verifyOtp", "Verifying...");
-    showStatus("OTP verifying...", "info");
+    logProfile(pState, `Verifying OTP: ${otp}...`, "#3b82f6");
     let successTriggered = false;
 
-    const payload = { requestId, phone: mobile, code: otp, otpChannel: "PHONE" };
+    const payload = { requestId, phone: pState.mobile, code: otp, otpChannel: "PHONE" };
     const headers = {
         "accept": "application/json, text/plain, */*",
         "cache-control": "no-cache, no-store, must-revalidate",
@@ -1058,35 +1019,30 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false,
     const handleSuccess = (msg, responseData = null) => {
         if (successTriggered) return;
         successTriggered = true;
-        verifyOtpWorkerCount = 0;
-        globalOtpVerified = true;
-        TaskManager.stopTask("verifyOtp");
-        finishBtn("verifyOtp", "Verify OTP", "done");
-        showStatus(`${msg} ✓`, "success");
-        logSolver(msg, '#16a34a', responseData);
+        pState.workerCounts.verifyOtp = 0;
+        pState.flags.globalOtpVerified = true;
+        TaskManager.stopTask(taskName);
+        pState.steps.verify = 'done';
+        pState.steps.reserve = 'active';
+        pState.verifiedAt = Date.now();
+        logProfile(pState, `OTP Verified! Slot Reservation Active.`, "#16a34a", responseData);
 
-        authStorage.state.isAuthenticated = true;
-        authStorage.state.isVerified = true;
-        
-        PRE_FETCHED_OTP = null;
-        UI_SOCKET?.emit("set-otp-value", "");
-        UI_SOCKET?.emit("start-login-countdown", 15 * 60);
+        pState.authStorage.state.isAuthenticated = true;
+        pState.authStorage.state.isVerified = true;
+        pState.PRE_FETCHED_OTP = null;
 
-        const bdTime = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" }));
-        const hours = bdTime.getHours();
-        const mins = bdTime.getMinutes();
-        const totalMins = hours * 60 + mins;
-        const isWithinWindow = totalMins >= (17 * 60) && totalMins <= (20 * 60 + 30); // 5:00 PM to 8:30 PM
+        // Auto-Trigger Reservation if in window
+        const bdNow = new Date(new Date().getTime() + 6 * 60 * 60 * 1000);
+        const totalMins = bdNow.getUTCHours() * 60 + bdNow.getUTCMinutes();
+        const isWithinWindow = totalMins >= (17 * 60) && totalMins <= (20 * 60 + 30);
 
         if (isWithinWindow) {
-            if (!isReserveStarted && __IVAC_RETRY__?.enabled) {
-                isReserveStarted = true;
-                reserveSlotAggressive(__IVAC_RETRY__);
+            if (!pState.flags.isReserveStarted && retrySettings?.enabled) {
+                pState.flags.isReserveStarted = true;
+                reserveSlotAggressive(pState, retrySettings);
             }
         } else {
-            TaskManager.stopAll();
-            logSolver(`[StopAll] Outside Reservation Window (5:00 PM - 8:30 PM)`, "#ef4444");
-            showStatus("Outside Hit Window. Stopped.", "error");
+            logProfile(pState, "Reserve Time (5:00 PM-8:30 PM)", "#ef4444");
         }
     };
 
@@ -1094,31 +1050,26 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false,
     let batchFailed = 0;
 
     const worker = async (id, delay = 0) => {
-        const controller = TaskManager.start("verifyOtp");
-        if (delay) await new Promise(r => TaskManager.setTimeout("verifyOtp", r, delay));
+        const controller = TaskManager.start(taskName);
+        if (delay) await new Promise(r => TaskManager.setTimeout(taskName, r, delay));
         if (successTriggered || controller.signal.aborted) return;
 
         if (global403PauseUntil && Date.now() < global403PauseUntil) {
-            return TaskManager.setTimeout("verifyOtp", () => worker(id, delay), global403PauseUntil - Date.now());
+            return TaskManager.setTimeout(taskName, () => worker(id, delay), global403PauseUntil - Date.now());
         }
 
         const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
-        logSolver(`${wTag} VerifyOTP Started`, "#3b82f6");
-        
         const onFail = (waitMs) => {
-            // Always check AUTO toggle first — if OFF, stop all retries immediately
-            if (!__IVAC_RETRY__?.enabled) return;
-
-            if (__IVAC_RETRY__.logic === "batch" && activeCount > 1) {
+            if (!retrySettings?.enabled) return;
+            if (retrySettings.logic === "batch" && activeCount > 1) {
                 batchFailed++;
                 if (batchFailed === activeCount && !successTriggered) {
-                    // All workers failed → wait 1s → refire all together
                     batchFailed = 0;
-                    logSolver(`[Batch] All ${activeCount} workers failed. Retrying in 1000ms...`, "#fbbf24");
-                    TaskManager.setTimeout("verifyOtp", () => verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, true), 1000);
+                    logProfile(pState, `[Batch] All workers failed. Retrying Verify...`, "#fbbf24");
+                    TaskManager.setTimeout(taskName, () => verifyOtpAggressive(pState, otp, retrySettings, true), 1000);
                 }
             } else {
-                TaskManager.setTimeout("verifyOtp", () => worker(id), waitMs);
+                TaskManager.setTimeout(taskName, () => worker(id), waitMs);
             }
         };
 
@@ -1129,104 +1080,46 @@ async function verifyOtpAggressive(mobile, otp, __IVAC_RETRY__, isBatch = false,
             const data = res.body;
 
             if (res.statusCode === 200 && data?.successFlag && data?.data?.verified) {
-                if (data?.data?.accessToken) {
-                    authStorage.state.token = data.data.accessToken;
-                }
-                if (!successTriggered) return handleSuccess(`${wTag} OTP Verified Successfully!`, data);
-                return;
+                if (data?.data?.accessToken) pState.authStorage.state.token = data.data.accessToken;
+                return handleSuccess(`OTP Verified Successfully!`, data);
             }
 
             if (res.statusCode === 200 && data?.successFlag && data?.data?.verified === false) {
-                TaskManager.removeController("verifyOtp", controller);
-                showStatus("OTP Not Valid!", "error");
-                logSolver(`${wTag} OTP Not Valid [${data?.statusCode}]`, '#d97706', data);
-                TaskManager.setTimeout("GetOtp", () => pollOtpLoop(mobile, __IVAC_RETRY__), 500);
+                logProfile(pState, "OTP Not Valid!", "#ef4444", data);
+                TaskManager.setTimeout(`GetOtp-${pState.id}`, () => pollOtpLoop(pState, retrySettings), 500);
                 return;
             }
 
-            if (res.statusCode === 404 || data?.statusCode === 404) {
-                TaskManager.stopTask("verifyOtp");
-                if (!successTriggered) return handleSuccess("OTP Already Verified!", data);
-            }
+            if (res.statusCode === 404) return handleSuccess("OTP Already Verified!", data);
 
-            if (res.statusCode !== 200 && res.statusCode !== 404) {
-                if (!__IVAC_RETRY__?.enabled) {
-                    TaskManager.removeController("verifyOtp", controller);
-                    if (res.statusCode === 502 || res.statusCode === 504) {
-                        logSolver(`OTP Verify Status [${res.statusCode}]`, '#d55252');
-                    } else {
-                        logSolver(`OTP Verify Status [${res.statusCode}]`, '#d55252', data);
-                    }
-                    return;
-                }
+            if (res.statusCode !== 200) {
+                if (!retrySettings?.enabled) return;
+                let waitMs = (retrySettings.seconds || 5) * 1000;
+                if (res.statusCode === 403 || res.statusCode === 503) waitMs = 4500 + Math.floor(Math.random() * 501);
+                else if (res.statusCode === 429) waitMs = 20000;
                 
-                let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
-
-                if (res.statusCode === 403) {
-                    if (Date.now() - lastVerifyOtp403Time > 10000) verifyOtp403Count = 0;
-                    verifyOtp403Count++;
-                    lastVerifyOtp403Time = Date.now();
-                    if (verifyOtp403Count >= verifyOtpWorkerCount && verifyOtpWorkerCount > 0) {
-                        global403PauseUntil = Date.now() + waitMs;
-                        logSolver(`[Cloud Rate Limit] All workers faced 403! Pausing ALL requests for ${waitMs/1000}s`, '#d55252');
-                        verifyOtp403Count = 0;
-                    }
-                }
-
-                if (res.statusCode === 403 || res.statusCode === 503) {
-                    waitMs = 4500 + Math.floor(Math.random() * 501); // 4.5s-5s
-                } else if (res.statusCode === 429) {
-                    waitMs = 20000; // 20s
-                } else if ([500, 501, 502, 504, 520].includes(res.statusCode)) {
-                    waitMs = 1500 + Math.floor(Math.random() * 500); // 800ms-1200ms
-                } else if ([400, 401].includes(res.statusCode)) {
-                    waitMs = 1000;
-                }
-                
-                if (res.statusCode === 502 || res.statusCode === 504) {
-                    logSolver(`OTP Verify Status [${res.statusCode}]`, '#d55252');
-                } else {
-                    logSolver(`OTP Verify Status [${res.statusCode}]`, '#d55252', data);
-                }
-                TaskManager.removeController("verifyOtp", controller);
+                logProfile(pState, `Verify Retry [${res.statusCode}] in ${(waitMs/1000).toFixed(1)}s`, "#eab308");
                 onFail(waitMs);
-                return;
             }
-
         } catch (e) {
             if (e.name === "AbortError") return;
-            TaskManager.removeController("verifyOtp", controller);
-            if (__IVAC_RETRY__?.enabled) {
-                showStatus(`[verifyOtp #${id}] Verify OTP failed!`, "error");
-                logSolver(`OTP Verify Failed!`, '#d55252');
-                onFail(1000); // 1s cooldown on network error — don't hammer a busy server
-            } else {
-                showStatus(`[verifyOtp #${id}] Verify OTP failed: ${e.message}`, "error");
-                logSolver(`OTP Verify Failed: ${e.message}`, '#d55252');
-                TaskManager.stopTask("verifyOtp");
-            }
+            logProfile(pState, `Verify Net Error: ${e.message}`, "#ef4444");
+            onFail(1000);
         }
-        TaskManager.removeController("verifyOtp", controller);
     };
 
-    if ((!isOtpVerifyAggressive || isBatch) && !isManual && __IVAC_RETRY__?.mode > 1) {
-        isOtpVerifyAggressive = true;
-        const numAutoWorkers = parseInt(__IVAC_RETRY__.mode, 10) || 3;
+    if ((!pState.flags.isOtpVerifyAggressive || isAutoRetry) && !isManual && retrySettings?.mode > 1) {
+        pState.flags.isOtpVerifyAggressive = true;
+        const numAutoWorkers = parseInt(retrySettings.mode, 10) || 3;
         activeCount = numAutoWorkers;
-        verifyOtpWorkerCount = numAutoWorkers; // reset so btn-click adds correctly after
-        const startWorker = (id, delay) => {
-            setTimeout(() => { if (!successTriggered) worker(id, 0); }, delay);
-        };
         for (let i = 1; i <= numAutoWorkers; i++) {
-            // Batch retry: 150-350ms gap per worker. First start: 1000ms gap (original)
-            let delay = isBatch ? ((i - 1) * (Math.floor(Math.random() * 201) + 150)) : ((i === 1) ? 150 : ((i - 1) * 1000 + Math.floor(Math.random() * 201)));
-            startWorker(i, delay);
+            let delay = isAutoRetry ? ((i - 1) * 200) : (i === 1 ? 150 : (i - 1) * 1000);
+            worker(i, delay);
         }
     } else {
-        // isManual=true OR single-worker fallback: add next sequential worker
         activeCount = 1;
-        verifyOtpWorkerCount++;
-        worker(verifyOtpWorkerCount, 0);
+        pState.workerCounts.verifyOtp++;
+        worker(pState.workerCounts.verifyOtp, 0);
     }
 }
 
@@ -1317,22 +1210,22 @@ async function checkFile(socket) {
     }
 }
 
-async function checkSlot(__IVAC_RETRY__) {
-    const taskName = "checkSlot";
+async function checkSlot(pState, retrySettings) {
+    if (!pState) return;
+    const taskName = `CheckSlot-${pState.id}`;
+    
     if (TaskManager.tasks[taskName]?.controllers.size) {
         TaskManager.stopTask(taskName);
-        showStatus("Check slot aborted", "info");
-        finishBtn("checkSlot", "Check Slot", "none");
+        logProfile(pState, "Check slot aborted", "#ef4444");
         return;
     }
 
-    finishBtn("checkSlot", "Loading...");
-    showStatus("Checking slot...", "info");
+    logProfile(pState, "Checking slot status...", "#3b82f6");
 
-    const token = getAuthToken();
+    const token = pState.authStorage.state.token;
     if (!token) {
-        finishBtn("checkSlot", "Check Slot", "none");
-        return showStatus("No auth token", "error");
+        logProfile(pState, "Check Slot Failed: No auth token", "#ef4444");
+        return;
     }
 
     const controller = TaskManager.start(taskName);
@@ -1348,18 +1241,16 @@ async function checkSlot(__IVAC_RETRY__) {
             if (res.statusCode === 200) {
                 if (data?.data?.slotOpen) {
                     TaskManager.stopTask(taskName);
-                    showStatus("Slot is open!", "success");
-                    finishBtn("checkSlot", "Check Slot", "done");
-                    logSolver(`Slots Info Received!`, '#16a34a', data);
-                    if (!isReserveStarted) {
-                        isReserveStarted = true;
-                        reserveSlotAggressive(__IVAC_RETRY__);
+                    logProfile(pState, "SLOT IS OPEN!", "#16a34a", data);
+                    if (!pState.flags.isReserveStarted && retrySettings?.enabled) {
+                        pState.flags.isReserveStarted = true;
+                        reserveSlotAggressive(pState, retrySettings);
                     }
                     return;
                 }
-                if (__IVAC_RETRY__?.enabled) {
-                    const waitSec = __IVAC_RETRY__.seconds || 10;
-                    showStatus(`Slot not open, Re-checking in ${waitSec}s..`, "error");
+                if (retrySettings?.enabled) {
+                    const waitSec = retrySettings.seconds || 10;
+                    logProfile(pState, `Slot not open. Retrying in ${waitSec}s...`, "#fbbf24");
                     await new Promise(r => TaskManager.setTimeout(taskName, r, waitSec * 1000));
                     return trySlot();
                 }
@@ -1369,104 +1260,73 @@ async function checkSlot(__IVAC_RETRY__) {
             if (res.statusCode !== 200) {
                 if (res.statusCode === 401) {
                     TaskManager.stopTask(taskName);
-                    showStatus(data?.error || "Login session expired!", "error");
-                    logSolver(data?.error || "Login session expired!", '#d55252', data);
-                    finishBtn("checkSlot", "Check Slot");
+                    logProfile(pState, "Session expired during Check Slot", "#ef4444", data);
                     return;
                 }
-                if (__IVAC_RETRY__?.enabled) {
-                    const waitSec = __IVAC_RETRY__.seconds || 10;
-                    showStatus(data?.error || `Checkslot failed. Retrying ${waitSec}s...`, "error");
+                if (retrySettings?.enabled) {
+                    const waitSec = retrySettings.seconds || 10;
+                    logProfile(pState, `CheckSlot status [${res.statusCode}]. Retrying ${waitSec}s...`, "#fbbf24");
                     await new Promise(r => TaskManager.setTimeout(taskName, r, waitSec * 1000));
                     return trySlot();
                 }
-                showStatus(data?.message || "Check Slot Failed", "error");
-                logSolver(`CheckSlot Status [${res.statusCode}]`, '#d55252', data);
-                finishBtn("checkSlot", "Check Slot");
+                logProfile(pState, `Check Slot Failed: ${res.statusCode}`, "#ef4444", data);
                 return;
             }
         } catch (err) {
             if (err.name === "AbortError") return;
-            if (__IVAC_RETRY__?.enabled) {
-                const waitSec = __IVAC_RETRY__.seconds || 10;
-                await new Promise(r => TaskManager.setTimeout(taskName, r, waitSec * 1000));
+            if (retrySettings?.enabled) {
+                logProfile(pState, `CheckSlot net error. Retrying 10s...`, "#ef4444");
+                await new Promise(r => TaskManager.setTimeout(taskName, r, 10000));
                 return trySlot();
             } else {
                 TaskManager.stopTask(taskName);
-                logSolver(`CheckSlot Network Error: ${err.message}`, '#d55252');
-                finishBtn("checkSlot", "Check Slot");
-                showStatus("Check Slot Failed: " + err.message, "error");
+                logProfile(pState, `CheckSlot net error: ${err.message}`, "#ef4444");
             }
         }
     };
     trySlot();
 }
 
-async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false, isManual = false, batchTokens = null) {
-    finishBtn("reserveSlot", "Reserving...");
-    showStatus("Reserve slot is running...", "info");
-    const accessToken = getAuthToken();
-    if (!accessToken) { finishBtn("reserveSlot", "Reserve Slot", "none"); return showStatus("No Access token", "error"); }
+async function reserveSlotAggressive(pState, retrySettings, isAutoRetry = false, isManual = false) {
+    pState.steps.reserve = 'active';
+    const taskName = `ReserveSlot-${pState.id}`;
+    const accessToken = pState.authStorage.state.token;
 
-    const headers = {
-        "accept": "application/json, text/plain, */*",
-        "cache-control": "no-cache, no-store, must-revalidate",
-        "authorization": "Bearer " + accessToken,
-    };
+    if (!accessToken) {
+        logProfile(pState, "Reserve Slot Failed: No access token", "#ef4444");
+        return;
+    }
 
+    logProfile(pState, "Reserving slot...", "#3b82f6");
     let successTriggered = false;
-
-    const handleSuccess = (data) => {
-        if (successTriggered) return;
-        successTriggered = true;
-        reserveSlotWorkerCount = 0;
-        TaskManager.stopTask("reserveSlot");
-        finishBtn("reserveSlot", "Reserve Slot", "done");
-        showStatus("Slot Reserved Successfully!", "success");
-        logSolver(`[ RESERVED SUCCESSFULLY ]`, '#16a34a', data);
-        UI_SOCKET?.emit("show-reservation-success-popup", { userId: panelConfig.user || "TechBroSniper" });
-    };
-
     let activeCount = 0;
     let batchFailed = 0;
-    let batchTokenMap = []; // collects per-worker {token, time} decisions for next batch round
+    let batchTokenMap = [];
 
     const worker = async (id, delay = 0, reuseToken = null, reuseTokenTime = null) => {
-        const controller = TaskManager.start("reserveSlot");
-        if (delay) await new Promise(r => TaskManager.setTimeout("reserveSlot", r, delay));
+        const controller = TaskManager.start(taskName);
+        if (delay) await new Promise(r => TaskManager.setTimeout(taskName, r, delay));
         if (successTriggered || controller.signal.aborted) return;
         
         if (global403PauseUntil && Date.now() < global403PauseUntil) {
-            return TaskManager.setTimeout("reserveSlot", () => worker(id, delay, reuseToken, reuseTokenTime), global403PauseUntil - Date.now());
+            return TaskManager.setTimeout(taskName, () => worker(id, delay, reuseToken, reuseTokenTime), global403PauseUntil - Date.now());
         }
 
         const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
-
         const onFail = (waitMs, reuseToken = null, reuseTokenTime = null) => {
-            // Always check AUTO toggle first — if OFF, stop all retries immediately
-            if (!__IVAC_RETRY__?.enabled) return;
-
-            if (__IVAC_RETRY__.logic === "batch" && activeCount > 1) {
-                // Collect this worker's token decision for the next batch round
+            if (!retrySettings?.enabled) return;
+            if (retrySettings.logic === "batch" && activeCount > 1) {
                 batchTokenMap.push({ token: reuseToken, time: reuseTokenTime });
                 batchFailed++;
-                if (!worker.maxBatchWait || waitMs > worker.maxBatchWait) {
-                    worker.maxBatchWait = waitMs;
-                }
                 if (batchFailed === activeCount && !successTriggered) {
-                    // All workers reported — take snapshot and refire with per-worker token decisions
-                    const batchWait = worker.maxBatchWait > 5000 ? worker.maxBatchWait : 1000;
-                    worker.maxBatchWait = 0;
                     batchFailed = 0;
                     const tokenSnapshot = [...batchTokenMap];
                     batchTokenMap = [];
-                    const reuseCount = tokenSnapshot.filter(t => t.token).length;
-                    const freshCount = tokenSnapshot.filter(t => !t.token).length;
-                    logSolver(`[Batch] All ${activeCount} workers failed. Retrying in ${batchWait}ms... [Reuse: ${reuseCount} | Fresh: ${freshCount}]`, "#fbbf24");
-                    TaskManager.setTimeout("reserveSlot", () => reserveSlotAggressive(__IVAC_RETRY__, true, false, tokenSnapshot), batchWait);
+                    logProfile(pState, `[Batch] All workers failed. Retrying Reserve Slot...`, "#fbbf24");
+                    TaskManager.setTimeout(taskName, () => reserveSlotAggressive(pState, retrySettings, true, false, tokenSnapshot), 1000);
                 }
             } else {
-                TaskManager.setTimeout("reserveSlot", () => worker(id, 0, reuseToken, reuseTokenTime), waitMs);
+                TaskManager.setTimeout(taskName, () => worker(id, 0, reuseToken, reuseTokenTime), waitMs);
             }
         };
 
@@ -1476,313 +1336,187 @@ async function reserveSlotAggressive(__IVAC_RETRY__, isBatch = false, isManual =
             recapToken = reuseToken;
             tokenTime = reuseTokenTime;
         } else {
-            let solveRes = await solveAggressive();
+            let solveRes = await solveAggressive(pState);
             if (solveRes) { 
                 recapToken = encryptCaptchaToken(solveRes.token);
                 tokenTime = solveRes.time;
-                logSolver(`${wTag} ReserveSlot Started`, "#3b82f6");
-            } else { finishBtn("reserveSlot", "Reserve Slot", "none"); return showStatus("Auto captcha solve failed!", "error"); }
+            } else { logProfile(pState, "Captcha solve failed", "#ef4444"); return; }
         }
 
         try {
             const reqStart = Date.now();
             const res = await getGotClient(`ReserveSlot-W${id}`, id).post(`${RootUrl}/iams/api/v1/slots/reserveSlot`, {
-                json: { captchaToken: recapToken }, headers, responseType: "json", signal: controller.signal,
-                context: { workerId: id }
+                json: { captchaToken: recapToken }, 
+                headers: { "authorization": "Bearer " + accessToken },
+                responseType: "json", signal: controller.signal
             });
             const data = res.body;
             const reqDuration = Date.now() - reqStart;
 
             if (res.statusCode === 200 && ["OK_NEW", "OK_EXISTING"].includes(data?.status) && data?.reservationId) {
-                logSolver(`${wTag} Slot Reserved Successfully`, '#16a34a', data);
-                return handleSuccess(data);
+                successTriggered = true;
+                pState.workerCounts.reserveSlot = 0;
+                TaskManager.stopTask(taskName);
+                pState.steps.reserve = 'done';
+                pState.steps.pay = 'active';
+                logProfile(pState, `[ RESERVED SUCCESSFULLY ]`, "#16a34a", data);
+                // Immediately transition to Payment
+                payNow(pState, retrySettings);
+                io.emit("show-reservation-success-popup", { profileId: pState.id, taskName: pState.taskName });
+                return;
             }
 
             if (res.statusCode === 200 && ["FULL", "NOT_OPEN", "SLOT_NOT_PREPARED"].includes(data?.status)) {
-                const wait = __IVAC_RETRY__.seconds || 10;
-                logSolver(`${wTag} Slot Status [ ${data?.status} ]`, '#b057ff', data);
-                
-                queueToken(); // Trigger solve in background if pool empty
-
-                logSolver(`${wTag} ReserveSlot Next Hit ${wait}s`);
-                TaskManager.removeController("reserveSlot", controller);
-                return onFail(wait * 1000, null);
+                const wait = (retrySettings.seconds || 10) * 1000;
+                logProfile(pState, `Slot Status [ ${data?.status} ]. Retrying in ${wait/1000}s`, "#b057ff");
+                queueToken();
+                return onFail(wait, null);
             }
 
             if (res.statusCode !== 200) {
-                 if (res.statusCode === 401) {
-                     const bdTime = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" }));
-                     const isOver510PM = (bdTime.getHours() > 17) || (bdTime.getHours() === 17 && bdTime.getMinutes() >= 10);
-                     
-                     if (isOver510PM) {
-                         TaskManager.stopAll();
-                         logSolver(`ReserveSlot 401 Expired (After 5:10 PM). Auto Re-login...`, '#dc2626');
-                         showStatus("Session Expired, auto re-login...", "error");
-                         if (panelConfig.saved_mobile && panelConfig.saved_password) {
-                             workerNetworkClients.clear();
-                             tlsSessionCache.clear();
-                             sendOtp(panelConfig.saved_email || null, panelConfig.saved_mobile, panelConfig.saved_password, __IVAC_RETRY__);
-                         }
-                         return;
-                     } else {
-                         logSolver(`[ReserveSlot] ${data?.message}`, '#b057ff');
-                     }
-                 }
+                if (res.statusCode === 401) {
+                    logProfile(pState, "Session expired during reservation", "#ef4444");
+                    return;
+                }
+                
+                let waitMs = (retrySettings.seconds || 5) * 1000;
+                if (res.statusCode === 403 || res.statusCode === 503) waitMs = 4500 + Math.floor(Math.random() * 501);
 
-                 if (res.statusCode === 503) {
-                     if (data && typeof data === 'object') {
-                         const msg = (data.message || data.error || "").toLowerCase();
-                         if (msg.includes("disable")) {
-                             logSolver(`ReserveSlot Disabled [${res.statusCode}]`,'#d55252');
-                             TaskManager.stopTask("reserveSlot");
-                             return;
-                         }
-                     }
-                 }
-
-                 if (!__IVAC_RETRY__?.enabled) {
-                     TaskManager.stopTask("reserveSlot");
-                     finishBtn("reserveSlot", "Reserve Slot", "none");
-                     if (res.statusCode === 403 || res.statusCode === 502 || res.statusCode === 504) {
-                         logSolver(`ReserveSlot Status [${res.statusCode}]`, '#d55252');
-                     } else {
-                         logSolver(`ReserveSlot Status [${res.statusCode}]`, '#d55252', data);
-                     }
-                     showStatus(data?.message || "Check Slot Failed", "error");
-                     return;
-                 }
-                 
-                 let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
-
-                 if (res.statusCode === 403) {
-                     if (Date.now() - lastReserveSlot403Time > 10000) reserveSlot403Count = 0;
-                     reserveSlot403Count++;
-                     lastReserveSlot403Time = Date.now();
-                     if (reserveSlot403Count >= reserveSlotWorkerCount && reserveSlotWorkerCount > 0) {
-                         global403PauseUntil = Date.now() + waitMs;
-                         logSolver(`[Cloud Rate Limit] All workers faced 403! Pausing ALL requests for ${waitMs/1000}s`, '#d55252');
-                         reserveSlot403Count = 0;
-                     }
-                 }
-
-                 if (res.statusCode === 403 || res.statusCode === 503) waitMs = 4500 + Math.floor(Math.random() * 501); // 4.5s-5s
-                 else if (res.statusCode === 429) waitMs = 20000; // 20s
-                 else if ([500, 501, 502, 504, 520, 401].includes(res.statusCode)) waitMs = 1500 + Math.floor(Math.random() * 500); // 800ms-1200ms
-                 else if ([400].includes(res.statusCode)) waitMs = 1000;
-
-                 if (res.statusCode === 403) {
-                     logSolver(`${wTag} Slot Status [ 403 ] -> Hard Resetting Session`, '#b057ff');
-                     clearWorkerClient(`ReserveSlot-W${id}`, id);
-                     clearTlsSession("api.ivacbd.com");
-                 } else if (res.statusCode === 502 || res.statusCode === 504) {
-                     logSolver(`${wTag} Slot Status [ ${res.statusCode} ]`, '#b057ff');
-                 } else {
-                     logSolver(`${wTag} Slot Status [ ${res.statusCode} ]`, '#b057ff', data);
-                 }
-
-                 TaskManager.removeController("reserveSlot", controller);
-                 
-                 if ([403, 503, 502, 504].includes(res.statusCode)) {
-                      // 403 → CF rate-limit, never reached origin → ALWAYS reuse until TTL
-                      // 502/503/504 < 3s → ALB dropped early, token untouched → reuse
-                      // 502/503/504 ≥ 3s → server may have processed it → fresh token
-                      const isTokenFresh = (Date.now() - tokenTime) <= 40000;
-                      const isGatewayError = [502, 503, 504].includes(res.statusCode);
-                      const canReuse = isTokenFresh && (res.statusCode === 403 || reqDuration < 3000);
-                      const tokenForRetry = canReuse ? recapToken : null;
-                      const timeForRetry = tokenForRetry ? tokenTime : null;
-                      if (!tokenForRetry && isGatewayError) queueToken(); // pre-solve next token in bg
-                      logSolver(`${wTag} Next Hit ${(waitMs/1000).toFixed(2)}s [Token: ${tokenForRetry ? 'REUSE' : 'NEW'}]`);
-                      return onFail(waitMs, tokenForRetry, timeForRetry);
-                  } else if (res.statusCode === 429) {
-                      logSolver(`${wTag} Next Hit ${(waitMs/1000).toFixed(2)}s`);
-                      return onFail(waitMs, null);
-                  }
-
-                  queueToken();
-                  logSolver(`${wTag} Next Hit ${(waitMs/1000).toFixed(2)}s`);
-                  return onFail(waitMs, null);
+                const isTokenFresh = (Date.now() - tokenTime) <= 40000;
+                const canReuse = isTokenFresh && (res.statusCode === 403 || reqDuration < 3000);
+                const tokenForRetry = canReuse ? recapToken : null;
+                
+                logProfile(pState, `Reserve Retry [${res.statusCode}] in ${(waitMs/1000).toFixed(1)}s`, "#eab308");
+                return onFail(waitMs, tokenForRetry, tokenTime);
             }
-
         } catch (e) {
             if (e.name === "AbortError") return;
-            TaskManager.removeController("reserveSlot", controller);
-            if (__IVAC_RETRY__?.enabled) {
-                const wait = 1500 + Math.floor(Math.random() * 500);
-                const isTokenAlive = recapToken && tokenTime && (Date.now() - tokenTime) < CAPTCHA_TTL;
-                const tokenForRetry = isTokenAlive ? recapToken : null;
-                const timeForRetry = tokenForRetry ? tokenTime : null;
-                if (!tokenForRetry) queueToken(); // solve fresh only when token is truly expired
-                logSolver(`${wTag} ReserveSlot Network Error [Token: ${tokenForRetry ? 'REUSE' : 'NEW'}] Next: ${(wait/1000).toFixed(1)}s`, '#b057ff');
-                return onFail(wait, tokenForRetry, timeForRetry);
-            } else {
-                TaskManager.stopTask("reserveSlot");
-                finishBtn("reserveSlot", "Reserve Slot", "none");
-                logSolver(`${wTag} ReserveSlot Status Network Error: ${e.message}`, '#d55252');
-                showStatus("Reserve Slot Failed: " + e.message, "error");
-            }
+            logProfile(pState, `Reserve Net Error: ${e.message}`, "#ef4444");
+            onFail(1500);
         }
     };
 
-    // logSolver('Reserve Slot Started....');
-    
-    let numWorkersToStart = 1;
-    if ((reserveSlotWorkerCount === 0 || isBatch) && !isManual && __IVAC_RETRY__?.mode > 1) {
-        numWorkersToStart = parseInt(__IVAC_RETRY__.mode, 10) || 3;
-    }
+    let numWorkersToStart = isManual ? 1 : ((retrySettings?.mode > 1) ? parseInt(retrySettings.mode, 10) || 1 : 1);
     activeCount = numWorkersToStart;
-    if (isBatch) reserveSlotWorkerCount = 0;
 
-    let currentDelay = 0;
     for (let i = 0; i < numWorkersToStart; i++) {
-        reserveSlotWorkerCount++;
-        const currentId = reserveSlotWorkerCount;
-        // On batch retry, each worker gets its own token decision from the previous round
         const batchToken = batchTokens ? (batchTokens[i]?.token || null) : null;
         const batchTokenTime = batchTokens ? (batchTokens[i]?.time || null) : null;
-        setTimeout(() => {
-            if (!successTriggered) worker(currentId, 0, batchToken, batchTokenTime);
-        }, currentDelay);
-        // 150-350ms staggered gap between workers
-        currentDelay += Math.floor(Math.random() * 201) + 150;
+        const delay = i * 250;
+        worker(i + 1, delay, batchToken, batchTokenTime);
     }
 }
 
-async function payNow(__IVAC_RETRY__, isBatch = false, isManual = false) {
-    payNowWorkerCount++;
-    const payWorkerId = isManual ? payNowWorkerCount : 1;
+async function payNow(pState, retrySettings, isAutoRetry = false, isManual = false) {
+    pState.steps.pay = 'active';
+    const taskName = `PayNow-${pState.id}`;
+    const accessToken = pState.authStorage.state.token;
 
-    const accessToken = getAuthToken();
-    if (!accessToken) { showStatus("No auth token", "error"); finishBtn("payNow", "Pay Now", "none"); return; }
+    if (!accessToken) { logProfile(pState, "Pay Now Failed: No access token", "#ef4444"); return; }
     
-    finishBtn("payNow", "Loading...");
-    showStatus("Initiating payment...", "info");
-
+    logProfile(pState, "Initiating payment...", "#3b82f6");
     let successTriggered = false;
 
-    let activeCount = 0;
-    let batchFailed = 0;
-
     const worker = async (id, delay = 0) => {
-        const controller = TaskManager.start("payNow");
-        if (delay) await new Promise(r => TaskManager.setTimeout("payNow", r, delay));
+        const controller = TaskManager.start(taskName);
+        if (delay) await new Promise(r => TaskManager.setTimeout(taskName, r, delay));
         if (successTriggered || controller.signal.aborted) return;
-
-        const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
-        logSolver(`${wTag} PayNow Hit Started...`, "#3b82f6");
-
-        const onFail = (waitMs) => {
-            // Always check AUTO toggle first — if OFF, stop all retries immediately
-            if (!__IVAC_RETRY__?.enabled) return;
-
-            if (__IVAC_RETRY__.logic === "batch" && activeCount > 1) {
-                batchFailed++;
-                if (batchFailed === activeCount && !successTriggered) {
-                    // All workers failed → wait 1s → refire all together
-                    batchFailed = 0;
-                    logSolver(`[Batch] All ${activeCount} workers failed. Retrying in 1000ms...`, "#fbbf24");
-                    TaskManager.setTimeout("payNow", () => payNow(__IVAC_RETRY__, true), 1000);
-                }
-            } else {
-                TaskManager.setTimeout("payNow", () => worker(id), waitMs);
-            }
-        };
 
         try {
             const res = await getGotClient(`PayNow-W${id}`, id).post(`${RootUrl}/iams/api/v1/payment/ssl/initiate`, {
                 headers: { "accept": "application/json, */*", "authorization": "Bearer " + accessToken },
                 responseType: "json", signal: controller.signal, timeout: { request: 180000 }
             });
-            const data = res.body;
+            const body = res.body;
 
-            if (res.statusCode >= 200 && res.statusCode < 300 && data?.data?.redirectGatewayURL) {
-                if (successTriggered) return;
+            if (res.statusCode >= 200 && res.statusCode < 300 && body?.success && body?.data?.paymentUrl) {
                 successTriggered = true;
-
-                showStatus("Payment link generated!", "success");
-                UI_SOCKET?.emit("payment-link", { url: data.data.redirectGatewayURL, userId: panelConfig.user || "TechBroSniper" });
-                TaskManager.stopTask("payNow");
-                finishBtn("payNow", "Pay Now", "done");
-                logSolver(`${wTag} ✔ [ PAYMENT LINK GENERATED ]`, '#16a34a', data);
+                pState.steps.pay = 'done';
+                pState.paymentUrl = body.data.paymentUrl;
+                logProfile(pState, `PayNow success! Link generated.`, "#16a34a", body);
+                TaskManager.stopTask(taskName);
                 return;
             }
 
-            if ([401].includes(res.statusCode)) {
-                if (!successTriggered) {
-                    successTriggered = true;
-                    showStatus(data?.error || "Login session expired!", "error");
-                    logSolver(`${wTag} ${data?.error || "Login session expired!"}`, '#d55252', data);
-                    TaskManager.stopTask("payNow");
-                    finishBtn("payNow", "Pay Now", "none");
-                }
+            if (res.statusCode === 401) {
+                logProfile(pState, "Session expired during payment", "#ef4444");
                 return;
             }
 
-            if ([400, 404].includes(res.statusCode)) {
-                if (!successTriggered) {
-                    successTriggered = true;
-                    showStatus(data?.message || data?.error || "Payment SSL failed!", "error");
-                    logSolver(`${wTag} [ RESERVATION NOT FOUND ]`, '#9333ea', data);
-                    TaskManager.stopTask("payNow");
-                    finishBtn("payNow", "Pay Now", "none");
-                }
-                return;
-            }
+            const wait = (retrySettings.seconds || 5) * 1000;
+            logProfile(pState, `PayNow Retry [${res.statusCode}] in ${wait/1000}s`, "#eab308");
+            TaskManager.setTimeout(taskName, () => worker(id), wait);
 
-            if (__IVAC_RETRY__?.enabled) {
-                let waitMs = (__IVAC_RETRY__.seconds || 5) * 1000;
-                if ([403, 503].includes(res.statusCode)) waitMs = 2500 + Math.floor(Math.random() * 501);
-                else if (res.statusCode === 429) waitMs = 20000; // 20s
-                else if ([502, 504, 520].includes(res.statusCode)) waitMs = 1500 + Math.floor(Math.random() * 500); // 800ms-1200ms
-
-                logSolver(`${wTag} Payment retry [${res.statusCode}] in ${waitMs}ms`, '#d55252', data);
-                TaskManager.removeController("payNow", controller);
-                return onFail(waitMs);
-            }
-
-            TaskManager.removeController("payNow", controller);
         } catch (err) {
             if (err.name === "AbortError") return;
-            TaskManager.removeController("payNow", controller);
-            if (__IVAC_RETRY__?.enabled) {
-                logSolver(`${wTag} Payment network error: ${err.message}`, '#d55252');
-                return onFail(1000);
-            } else {
-                TaskManager.stopTask("payNow");
-                finishBtn("payNow", "Pay Now", "none");
-                logSolver(`${wTag} Payment network error: ${err.message}`, '#d55252');
-                showStatus("Payment Failed: " + err.message, "error");
-            }
+            logProfile(pState, `PayNow Net Error: ${err.message}`, "#ef4444");
+            TaskManager.setTimeout(taskName, () => worker(id), 2000);
         }
     };
 
-    let numWorkers = (isManual || !(__IVAC_RETRY__?.mode > 1)) ? 1 : parseInt(__IVAC_RETRY__.mode, 10) || 1;
-    activeCount = numWorkers;
-
-    const startWorker = (id, delay) => {
-        setTimeout(() => { if (!successTriggered) worker(id, 0); }, delay);
-    };
-
-    if (isManual) {
-        // Button click: fire next worker ID (adds to existing running workers)
-        startWorker(payWorkerId, 0);
-    } else {
-        for (let i = 1; i <= numWorkers; i++) {
-            // Batch retry: 150-350ms gap per worker. First start: 1000ms gap (original)
-            let delay = isBatch ? ((i - 1) * (Math.floor(Math.random() * 201) + 150)) : ((i === 1) ? 150 : ((i - 1) * 1000 + Math.floor(Math.random() * 201)));
-            startWorker(i, delay);
-        }
-    }
+    worker(1, 0);
 }
-
 
 // ==========================================
 // SOCKET ROUTES
 // ==========================================
 io.on("connection", (socket) => {
     socket.authenticated = false;
-    UI_SOCKET = socket;
     console.log("UI Connected:", socket.id);
+
+    socket.on("ping", () => socket.emit("pong"));
+
+    // --- GLOBAL ACTIONS (PRIORITY) ---
+    socket.on("all-profiles-start", (data) => {
+        logSolver("📡 Received: GLOBAL START command", "#3b82f6");
+        const count = profileStates.size;
+        const retrySettings = data?.retrySettings || data || {}; 
+        logSolver(`▶ GLOBAL START: Initiating ${count} profiles with Mode: ${retrySettings.mode || 'Default'}X`, "#10b981");
+        
+        profileStates.forEach(pState => {
+            logProfile(pState, "Global start signal received.", "#3b82f6");
+            sendOtp(pState, retrySettings, null, false);
+        });
+    });
+
+    socket.on("all-profiles-stop", () => {
+        logSolver("📡 Received: GLOBAL STOP command", "#3b82f6");
+        const count = profileStates.size;
+        logSolver(`⏹ GLOBAL STOP: Halting all ${count} tasks...`, "#ef4444");
+        profileStates.forEach(pState => {
+            const profileId = pState.id;
+            TaskManager.stopTask(`VerifyOtp-${profileId}`);
+            TaskManager.stopTask(`SendOtp-${profileId}`);
+            TaskManager.stopTask(`ReserveSlot-${profileId}`);
+            TaskManager.stopTask(`PayNow-${profileId}`);
+            TaskManager.stopTask(`GetOtp-${profileId}`);
+            logProfile(pState, "Global Stop signal received.", "#64748b");
+        });
+    });
+
+    socket.on("all-profiles-reset", () => {
+        logSolver("📡 Received: GLOBAL RESET command", "#3b82f6");
+        const count = profileStates.size;
+        logSolver(`🔄 GLOBAL RESET: Wiping states/logs for all ${count} profiles...`, "#f59e0b");
+        profileStates.forEach(pState => {
+            const profileId = pState.id;
+            TaskManager.stopTask(`VerifyOtp-${profileId}`);
+            TaskManager.stopTask(`SendOtp-${profileId}`);
+            TaskManager.stopTask(`ReserveSlot-${profileId}`);
+            TaskManager.stopTask(`PayNow-${profileId}`);
+            TaskManager.stopTask(`GetOtp-${profileId}`);
+            
+            resetProfileState(pState);
+            
+            try {
+                const logFile = path.join(__dirname, "logs", `${profileId}.log`);
+                if (fs.existsSync(logFile)) fs.truncateSync(logFile, 0);
+            } catch (e) {}
+
+            io.emit("profile-log-clear", profileId);
+            logProfile(pState, "Profile global reset complete.", "#06b6d4");
+        });
+    });
 
     const secure = (handler) => (data, cb) => {
         if (!socket.authenticated) {
@@ -1806,7 +1540,12 @@ io.on("connection", (socket) => {
         if (data?.user === panelConfig.user && data?.pass === panelConfig.pass) {
             socket.authenticated = true;
             const token = generateSessionToken();
-            cb({ success: true, token });
+            if (typeof cb === "function") cb({ success: true, token });
+            else socket.emit("login-success", { token });
+
+            // Send all current profiles immediately
+            socket.emit("all-profiles", Array.from(profileStates.values()));
+
             socket.emit("initial-config", {
                 mobile: panelConfig.saved_mobile || "",
                 email: panelConfig.saved_email || "",
@@ -1816,14 +1555,19 @@ io.on("connection", (socket) => {
                 dnsIp: (dnsMap["api.ivacbd.com"] || [])[0] || null
             });
         } else {
-            cb({ success: false });
+            if (typeof cb === "function") cb({ success: false });
+            else socket.emit("login-error", "Invalid Credentials");
         }
     });
 
     socket.on("panel-session-login", (data, cb) => {
         if (data?.token && data.token === currentSessionToken && Date.now() < sessionExpiry) {
             socket.authenticated = true;
-            cb(true);
+            if (typeof cb === "function") cb(true);
+
+            // Send profiles for the resumed session
+            socket.emit("all-profiles", Array.from(profileStates.values()));
+
             socket.emit("initial-config", {
                 mobile: panelConfig.saved_mobile || "",
                 email: panelConfig.saved_email || "",
@@ -1833,7 +1577,7 @@ io.on("connection", (socket) => {
                 dnsIp: (dnsMap["api.ivacbd.com"] || [])[0] || null
             });
         } else {
-            cb(false);
+            if (typeof cb === "function") cb(false);
         }
     });
 
@@ -1844,80 +1588,57 @@ io.on("connection", (socket) => {
         fs.writeFileSync(path.join(__dirname, "config.json"), JSON.stringify(panelConfig, null, 2));
     }));
     
-    socket.on("send-otp", secure((data) => { sendOtp(data.email, data.mobile, data.mbpassword, data.retrySettings, data.oldOtp, true); }));
-    socket.on("verify-otp", secure((data) => { verifyOtpAggressive(data.mobile, data.otp, data.retrySettings, false, true); }));
-    socket.on("reserve-slot", secure((data) => { reserveSlotAggressive(data.retrySettings, false, true); }));
-    socket.on("pay-now", secure((data) => { payNow(data.retrySettings, false, true); }));
-    
-    socket.on("get-session-data", secure(() => {
-        if (authStorage.state.isAuthenticated || authStorage.state.token) {
-            socket.emit("receive-session-data", authStorage);
-        }
+
+    // INITIAL BROADCAST (for already logged in clients)
+    if (socket.authenticated) {
+        socket.emit("all-profiles", Array.from(profileStates.values()));
+    }
+
+    socket.on("profile-check-slot", secure((data) => {
+        const pState = profileStates.get(data.profileId);
+        if (pState) checkSlot(pState, data.retrySettings);
     }));
 
-    socket.on("get-otp", secure((data) => { pollOtpLoop(data.mobile, data.retrySettings, true); }));
-    socket.on("reserve-otp", secure((data) => { reserveOtp(data.email,data.mobile, data.retrySettings, data.isPreWarmup); }));
-    socket.on("pre-solve-batch", secure((count) => {
-        for (let i = 0; i < count; i++) {
-            queueToken();
-        }
-    }));
-    socket.on("check-slot", secure((data) => { checkSlot(data.retrySettings); }));
-    socket.on("check-file", secure(() => { checkFile(socket); }));
-    socket.on("upload-file", secure((data) => { uploadFile(socket, data); }));
     socket.on("cap-settings", secure((data) => { 
-        CapInfo = data; 
         panelConfig.capInfo = data;
         fs.writeFileSync(path.join(__dirname, "config.json"), JSON.stringify(panelConfig, null, 2));
         logSolver("Server received new Captcha Settings.", "#10b981"); 
     }));
 
     socket.on("update-direct-api", secure((payload) => {
-        // Accept both old format (bool) and new format ({directApi, dnsIp})
         const isObject = typeof payload === 'object' && payload !== null;
         const newDirectApi = isObject ? payload.directApi : payload;
         const newDnsIp = isObject ? payload.dnsIp : null;
-
+        
         setDirectApi(newDirectApi);
 
         if (newDnsIp) {
-            // Update dnsMap with the user-provided IP
             dnsMap["api.ivacbd.com"] = [newDnsIp];
-            // Persist to panelConfig so it survives hard-reset
             panelConfig.saved_dns_ip = newDnsIp;
             fs.writeFileSync(path.join(__dirname, "config.json"), JSON.stringify(panelConfig, null, 2));
         } else {
-            // No IP provided — reload from dnsconfig.js static value
             reloadDnsConfig();
         }
-
-        // Clear all cached clients so next request picks up new IP
         workerNetworkClients.clear();
-
         const activeDns = directApi ? "Direct API Mode" : ((dnsMap["api.ivacbd.com"] || [])[0] || "Default");
-        logSolver(`🌐 DNS Engine Updated → ${newDirectApi ? "Direct" : "DNS Map"} | IP: ${activeDns}`, "#10b981");
+        logSolver(`🌐 DNS Engine Updated → ${directApi ? "Direct" : "DNS Map"} | IP: ${activeDns}`, "#10b981");
     }));
+
     socket.on("proxy-state", secure((state) => { 
         currentProxyState = state; 
         workerNetworkClients.clear(); 
         logSolver(`✔ Proxy Engine mapped to: ${state.activeMode}`, "#3b82f6"); 
         reloadDnsConfig();
-        const activeDns = directApi ? "Direct Router API" : (dnsMap["api.ivacbd.com"] || "Default API");
-        logSolver(`🌐 Reservation DNS IP: ${activeDns}`, "#10b981");
     }));
-    
+
     socket.on("test-proxy", secure(async (data) => {
         const { index, proxy } = data;
         const startTime = performance.now();
         const credentials = (proxy.user && proxy.pass) ? `${proxy.user}:${proxy.pass}@` : "";
         const proxyUrl = `http://${credentials}${proxy.host}:${proxy.port}`;
-        
         try {
             const res = await gotScraping.get(`${RootUrl}/iams/api/v1/slots/getVisaCenter`, {
-                proxyUrl: proxyUrl,
-                timeout: { request: 10000 },
-                throwHttpErrors: false,
-                retry: { limit: 0 }
+                proxyUrl: proxyUrl, timeout: { request: 10000 }, throwHttpErrors: false, retry: { limit: 0 }
             });
             const ms = Math.floor(performance.now() - startTime);
             socket.emit("test-proxy-result", { index, success: true, status: res.statusCode, ms });
@@ -1925,98 +1646,213 @@ io.on("connection", (socket) => {
             socket.emit("test-proxy-result", { index, success: false, status: e.code || e.message || "Error" });
         }
     }));
-    
-    socket.on("hard-reset", secure(() => {
+
+    socket.on("hard-reset", (data) => {
+        if (!socket.authenticated) {
+            logSolver("❌ Unauthorized: Please login first.", "#ef4444");
+            return;
+        }
         TaskManager.stopAll();
         workerNetworkClients.clear();
-        currentProxyState.activeMode = "native";
         preSolvedTokens = [];
         solversInProgress = 0;
-        PRE_FETCHED_OTP = null;
-        lastGetOtp = [];
-        isReserveOtpSend = false;
-        isReserveStarted = false;
-        isOtpVerifyAggressive = false;
-        pollingOtp = false;
-        globalOtpVerified = false;
-        sendOtpWorkerCount = 0;
-        verifyOtpWorkerCount = 0;
-        reserveSlotWorkerCount = 0;
-        payNowWorkerCount = 0;
-        
-        authStorage.state = {
-            token: null,
-            expiresAt: 899,
-            isAuthenticated: false,
-            isVerified: false,
-            phone: null,
-            password: null,
-            requestId: null,
-            userId: null,
-            otpSentAt: null
-        };
-        
-        socket.emit("hide-export-session");
         io.emit("solver-clear");
-        reloadDnsConfig();
-        // Restore user-saved DNS IP if set (overrides static dnsconfig.js value)
-        if (panelConfig.saved_dns_ip) {
-            dnsMap["api.ivacbd.com"] = [panelConfig.saved_dns_ip];
+        
+        logSolver("------- [ RESTARTING ENGINE ] -------", "#3b82f6");
+        logSolver("🚀 Server Restarting via PM2...", "#10b981");
+
+        try {
+            // Delay slightly to allow socket messages to leave the buffer
+            setTimeout(() => {
+                try {
+                    execSync("pm2 restart all", { stdio: "ignore" });
+                } catch (err) {
+                    console.error("PM2 Restart failed:", err.message);
+                }
+            }, 1000);
+        } catch (error) {
+            logSolver("❌ PM2 Restart failed. Check your process manager.", "#ef4444");
         }
-        const activeDns = directApi ? "Direct API Mode" : ((dnsMap["api.ivacbd.com"] || [])[0] || "Default");
-        logSolver("> ==============================", "#10b981");
-        logSolver("> SOFTWARE Restart successfully", "#10b981");
-        logSolver(`> DNS Mode: ${directApi ? "Direct" : "DNS Map"} | IP: ${activeDns}`, "#10b981");
-        logSolver("> ==============================", "#10b981");
-        showStatus("Server System Reset", "success");
-    }));
-    
-    socket.on("git-update", secure(() => {
-        logSolver("🚀 Initiating System Update via script...", "#3b82f6");
+    });
+
+    socket.on("git-update", (data) => {
+        if (!socket.authenticated) {
+            logSolver("❌ Unauthorized: Please login first.", "#ef4444");
+            return;
+        }
+        const msg = "🚀 Initiating System Update (git pull)...";
+        logSolver(msg, "#3b82f6");
         
         const scriptPath = path.join(__dirname, "update.js");
-        const updateProcess = spawn("node", [scriptPath], { cwd: __dirname });
+        if (!fs.existsSync(scriptPath)) {
+            logSolver("❌ update.js not found in root!", "#ef4444");
+            return;
+        }
 
-        updateProcess.stdout.on("data", (data) => {
-            data.toString().split("\n").forEach(line => {
-                if (line.trim()) logSolver(line, "#10b981");
-            });
-        });
-
-        updateProcess.stderr.on("data", (data) => {
-            data.toString().split("\n").forEach(line => {
-                if (line.trim()) logSolver(line, "#ef4444");
-            });
-        });
-
-        updateProcess.on("close", (code) => {
-            if (code !== 0) {
-                logSolver(`❌ Update Process exited with code ${code}`, "#ef4444");
-            } else {
-                logSolver("✅ System Update Cycle Completed.", "#10b981");
-            }
-        });
-    }));
-    
-    socket.on("pre-solve", secure(() => { queueToken(); }));
-    socket.on("pre-solve-batch", secure((size = 2) => { 
-        for(let i=0; i<size; i++) queueToken(); 
-    }));
-    socket.on("sms-list", secure(async (data) => {
-        if (!data.mobile) return showStatus("Enter Mobile Number", "error");
         try {
-            const res = await gotScraping(`https://sms.mrshuvo.xyz/ivac/${data.mobile}`, { responseType: "json" });
-            const body = res.body;
-            if (body?.success && body?.data?.otp) {
-                showStatus(`Latest SMS: ${body.data.otp}`, "success");
-                logSolver(`SMS Data: ${JSON.stringify(body.data)}`, '#3b82f6');
-            } else {
-                showStatus("No recent SMS found", "error");
-            }
+            const updateProcess = spawn("node", [scriptPath], { 
+                cwd: __dirname,
+                env: { ...process.env, FORCE_COLOR: "1" },
+                shell: true 
+            });
+
+            updateProcess.stdout.on("data", (data) => {
+                const lines = data.toString().split("\n");
+                lines.forEach(line => {
+                    if (line.trim()) logSolver(line.trim(), "#10b981");
+                });
+            });
+
+            updateProcess.stderr.on("data", (data) => {
+                const lines = data.toString().split("\n");
+                lines.forEach(line => {
+                    if (line.trim()) logSolver(`[ERR] ${line.trim()}`, "#ef4444");
+                });
+            });
+
+            updateProcess.on("error", (err) => {
+                logSolver(`❌ Spawn Error: ${err.message}`, "#ef4444");
+            });
+
+            updateProcess.on("close", (code) => {
+                if (code === 0) {
+                    logSolver("✅ System Update Cycle Finished Successfully.", "#10b981");
+                } else {
+                    logSolver(`⚠️ Update Process exited with code ${code}`, "#f59e0b");
+                }
+            });
         } catch (e) {
-            showStatus("Failed to fetch SMS", "error");
+            logSolver(`❌ Update execution failed: ${e.message}`, "#ef4444");
+        }
+    });
+
+    socket.on("profile-add", secure((pData) => {
+        const pState = createProfileState(pData);
+        profileStates.set(pState.id, pState);
+        
+        panelConfig.profiles = Array.from(profileStates.values()).map(s => ({
+            id: s.id, taskName: s.taskName, email: s.email, mobile: s.mobile, password: s.password
+        }));
+        fs.writeFileSync(path.join(__dirname, "config.json"), JSON.stringify(panelConfig, null, 2));
+        
+        socket.emit("profile-added", pState);
+        logProfile(pState, "Profile initialized and ready.", "#10b981");
+    }));
+
+    socket.on("profile-remove", (profileId) => {
+        if (!socket.authenticated) {
+            logSolver("❌ Unauthorized: Login required to delete profiles.", "#ef4444");
+            return;
+        }
+        if (profileStates.has(profileId)) {
+            const pState = profileStates.get(profileId);
+            logSolver(`🗑️ Deleting Profile: ${pState.taskName} (${profileId})`, "#ef4444");
+            
+            TaskManager.stopTask(`VerifyOtp-${profileId}`);
+            TaskManager.stopTask(`SendOtp-${profileId}`);
+            TaskManager.stopTask(`ReserveSlot-${profileId}`);
+            TaskManager.stopTask(`PayNow-${profileId}`);
+            TaskManager.stopTask(`GetOtp-${profileId}`);
+            
+            profileStates.delete(profileId);
+            panelConfig.profiles = Array.from(profileStates.values()).map(s => ({
+                id: s.id, taskName: s.taskName, email: s.email, mobile: s.mobile, password: s.password
+            }));
+            fs.writeFileSync(path.join(__dirname, "config.json"), JSON.stringify(panelConfig, null, 2));
+            io.emit("profile-removed", profileId);
+        }
+    });
+
+    socket.on("profile-start", secure((data) => {
+        const pState = profileStates.get(data.profileId);
+        if (pState) {
+            sendOtp(pState, data.retrySettings, null, true);
         }
     }));
+
+    socket.on("profile-reserve", secure((data) => {
+        const pState = profileStates.get(data.profileId);
+        if (pState) reserveSlotAggressive(pState, data.retrySettings, false, true);
+    }));
+
+    socket.on("profile-paynow", secure((data) => {
+        const pState = profileStates.get(data.profileId);
+        if (pState) payNow(pState, data.retrySettings, false, true);
+    }));
+
+    socket.on("profile-reset", secure((profileId) => {
+        const pState = profileStates.get(profileId);
+        if (pState) {
+            // Stop everything first
+            TaskManager.stopTask(`SendOtp-${profileId}`);
+            TaskManager.stopTask(`VerifyOtp-${profileId}`);
+            TaskManager.stopTask(`ReserveSlot-${profileId}`);
+            TaskManager.stopTask(`PayNow-${profileId}`);
+            TaskManager.stopTask(`GetOtp-${profileId}`);
+            
+            resetProfileState(pState);
+            
+            // Clear log file
+            try {
+                const logFile = path.join(__dirname, "logs", `${profileId}.log`);
+                if (fs.existsSync(logFile)) fs.truncateSync(logFile, 0);
+            } catch (e) {}
+
+            io.emit("profile-log-clear", profileId);
+            logProfile(pState, "Profile state and logs have been reset.", "#06b6d4");
+        }
+    }));
+
+    socket.on("profile-stop", secure((profileId) => {
+        const pState = profileStates.get(profileId);
+        if (pState) {
+            TaskManager.stopTask(`VerifyOtp-${profileId}`);
+            TaskManager.stopTask(`SendOtp-${profileId}`);
+            TaskManager.stopTask(`ReserveSlot-${profileId}`);
+            TaskManager.stopTask(`PayNow-${profileId}`);
+            TaskManager.stopTask(`GetOtp-${profileId}`);
+            logProfile(pState, "Task stopped manually.", "#64748b");
+        }
+    }));
+
+    socket.on("profile-get-otp", secure((data) => {
+        const pState = profileStates.get(data.profileId);
+        if (pState) {
+            pollOtpLoop(pState, data.retrySettings, true);
+        }
+    }));
+
+    socket.on("profile-verify-otp", secure((data) => {
+        const pState = profileStates.get(data.profileId);
+        if (pState && data.otp) {
+            verifyOtpAggressive(pState, data.otp, data.retrySettings, false, true);
+        }
+    }));
+
+    socket.on("get-profile-log", secure((profileId) => {
+        try {
+            const logFile = path.join(__dirname, "logs", `${profileId}.log`);
+            if (fs.existsSync(logFile)) {
+                const content = fs.readFileSync(logFile, "utf8");
+                socket.emit("profile-log-data", { profileId, content });
+            } else {
+                socket.emit("profile-log-data", { profileId, content: "Log file not found." });
+            }
+        } catch (e) {
+            socket.emit("profile-log-data", { profileId, content: "Error reading log: " + e.message });
+        }
+    }));
+
+    socket.on("clear-profile-log", secure((profileId) => {
+        try {
+            const logFile = path.join(__dirname, "logs", `${profileId}.log`);
+            fs.writeFileSync(logFile, "");
+            socket.emit("profile-log-cleared", profileId);
+        } catch (e) {}
+    }));
+
+    // INITIAL LOAD
+    socket.emit("all-profiles", Array.from(profileStates.values()));
 });
 
 const PORT = panelConfig.port || 5000;

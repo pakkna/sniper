@@ -3,374 +3,452 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>High-Speed Sniper</title>
-    <!-- We extract the exact CSS rules from the injected DOM script and apply them here -->
+    <title>IVAC Sniper Pro - Multi-Profile Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
-        body {
-            background-color: #020617; /* Dark background matching the theme */
-            margin: 0;
-            padding: 0;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
+        :root {
+            --bg-main: #020617;
+            --bg-card: #0b1220;
+            --accent-blue: #3b82f6;
+            --accent-green: #10b981;
+            --accent-red: #ef4444;
+            --accent-purple: #8b5cf6;
+            --accent-amber: #f59e0b;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --border: rgba(255, 255, 255, 0.08);
+            --glass: rgba(15, 23, 42, 0.6);
         }
 
-        #ivac-panel {
-            width: 330px;
-            max-width: 100%;
-            background: #0b1220;
-            color: #e5e7eb;
-            border-radius: 12px;
-            z-index: 999999;
-            font-family: system-ui, -apple-system, Segoe UI;
-            box-shadow: 0 20px 50px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,0.05);
-            font-size: 13px;
-            padding-bottom: 8px;
-            flex-shrink: 0;
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            background-color: var(--bg-main); 
+            color: var(--text-primary); 
+            font-family: 'Inter', sans-serif; 
+            min-height: 100vh;
+            overflow-x: hidden;
         }
-        #ivac-head {
-            padding: 10px 12px;
-            background: linear-gradient(90deg, #1e293b, #020617);
-            border-radius: 12px 12px 0 0;
+
+        /* --- Header / Settings Bar --- */
+        .top-bar {
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border);
+            padding: 12px 24px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            backdrop-filter: blur(12px);
+        }
+
+        .logo {
+            font-size: 18px;
+            font-weight: 800;
+            background: linear-gradient(135deg, #60a5fa, #a855f7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            white-space: nowrap;
+        }
+
+        .settings-group {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 4px 12px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+        }
+
+        .setting-item { display: flex; flex-direction: column; gap: 2px; }
+        .setting-label { font-size: 10px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+        
+        select, input[type="text"], input[type="password"], input[type="number"] {
+            background: #020617;
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 6px 10px;
+            font-size: 12px;
+            outline: none;
+            transition: 0.2s;
+        }
+        select:focus, input:focus { border-color: var(--accent-blue); box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2); }
+
+        .btn {
+            padding: 4px 6px;
+            border-radius: 6px;
+            font-size: 10px;
             font-weight: 600;
+            cursor: pointer;
+            border: none;
+            transition: 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: white;
+            white-space: nowrap;
+        }
+        .btn-primary { background: var(--accent-blue); }
+        .btn-primary:hover { background: #2563eb; transform: translateY(-1px); }
+        .btn-success { background: var(--accent-green); }
+        .btn-danger { background: var(--accent-red); }
+        .btn-warning { background: #f59e0b; }
+        .btn-warning:hover { background: #d97706; transform: translateY(-1px); }
+        .btn-purple { background: #8b5cf6; }
+        .btn-purple:hover { background: #7c3aed; transform: translateY(-1px); }
+        .btn-info { background: #06b6d4; }
+        .btn-info:hover { background: #0891b2; transform: translateY(-1px); }
+        .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text-secondary); }
+        .btn-ghost:hover { background: rgba(255, 255, 255, 0.05); color: white; }
+
+        .clock-container {
+            margin-left: auto;
+            text-align: right;
+        }
+        #bd-clock { font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: 600; color: var(--accent-amber); }
+
+        /* --- Main Content --- */
+        .main-content { padding: 24px; max-width: 1600px; margin: 0 auto; }
+
+        .section-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
+            margin-bottom: 16px;
         }
-        #ivac-head .tabs { display: flex; gap: 6px; }
-        #ivac-head .tab { padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; background: #1e293b; transition: 0.2s; }
-        #ivac-head .tab.active { background: #2563eb; font-weight: 600; }
-        #ivac-body { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
-        #ivac-panel .row { display: flex; gap: 6px; flex-wrap: wrap; }
-        #ivac-panel input { flex: 1; min-width: 80px; padding: 7px 8px; background: #020617; color: #e5e7eb; border: 1px solid #334155; border-radius: 6px; }
-        #ivac-panel input#otp { flex: 1.4; letter-spacing: 4px; font-size: 16px; border: 1px solid #334155; color: #e5e7eb; } 
-        
-        .login-type { display: inline-flex; align-items: center; background: #0f172a; border: 1px solid #4b586a; border-radius: 999px; padding: 3px; gap: 2px; width: 100%; justify-content: center; }
-        
-        button { padding: 7px 10px; border-radius: 6px; border: none; font-size: 12px; cursor: pointer; color: #fff; flex-shrink: 0; white-space: nowrap; }
-        .btn-otp { background: linear-gradient(90deg, #6c757d, #495057); }
-        .btn-sms { background: linear-gradient(90deg, #6b7280, #374151); }
-        .btn-send { background: linear-gradient(90deg, #2563eb, #1d4ed8); }
-        .btn-verify { background: linear-gradient(90deg, #9333ea, #7e22ce); }
-        .btn-save { background: linear-gradient(90deg, #16a34a, #15803d); }
-        .btn-checkSlot { background: linear-gradient(90deg, #f59e0b, #d97706); }
-        .btn-reserveSlot { background: linear-gradient(90deg, #16a34a, #15803d); }
-        .btn-payNow { background: linear-gradient(90deg, #dc2626, #b91c1c); }
-        
-        #status { font-size: 12px; font-weight: 500; padding: 6px 10px; border-radius: 12px; text-align: center; transition: all 0.3s ease; display: none; }
-        #status.success { background: #16a34a; color: #fff; }
-        #status.error { background: #dc2626; color: #fff; }
-        #status.info { background: #2563eb; color: #fff; }
-        
-        #signinTab { display: flex; flex-direction: column; gap: 6px; transition: all 0.3s; }
-        #signinTab.hidden { display: none; }
-        
-        #app-container { display: none !important; gap: 5px !important; align-items: stretch; width: 80% !important; max-width: 900px !important; padding: 5px; box-sizing: border-box; justify-content: center; margin: auto; }
-        @media (max-width: 720px) { 
-            body { height: auto; align-items: flex-start; padding: 20px 0; }
-            #app-container { flex-direction: column; align-items: center; gap: 10px !important; } 
-            #ivac-panel { width: 100% !important; max-width: 400px !important; }
-            #console-panel { width: 100% !important; max-width: 500px !important; min-width: 0 !important; margin-top: 5px !important; height: 600px; }
+
+        /* --- Task Table --- */
+        .table-container {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
         }
-        #console-panel { flex: 1; min-width: 360px; max-width: 500px !important; height: 600px; background: #0b1220; border-radius: 12px; display: flex; flex-direction: column; box-shadow: 0 20px 50px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,0.05); border: 1px solid #1e293b; }
-        #solver-container { flex: 1; min-height: 0; overflow-y: auto; color: #34d399; padding: 15px; background: #020617; font-family: 'Courier New', Courier, monospace; font-size: 13px; box-shadow: inset 0 0 15px rgba(0,0,0,0.8); }
-        #solver-console { white-space: pre-wrap; font-size: 13px; line-height: 1.15; text-shadow: 0 0 2px rgba(52,211,153,0.3); }
-        #solver-clear { background: #dc2626; color: #fff; border: none; border-radius: 6px; padding: 6px 15px; font-size: 12px; font-weight: bold; cursor: pointer; transition: 0.2s; display: inline-flex; align-items: center; gap: 5px; box-shadow: 0 2px 8px rgba(220,38,38,0.2); }
-        #solver-clear:hover { background: #b91c1c; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(220,38,38,0.3); }
+
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th { 
+            background: rgba(255,255,255,0.02); 
+            text-align: left; 
+            padding: 14px 16px; 
+            color: var(--text-secondary); 
+            font-weight: 600;
+            border-bottom: 1px solid var(--border);
+        }
+        td { padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+        tr:hover { background: rgba(255,255,255,0.01); }
+
+        .status-msg { font-size: 12px; color: var(--text-secondary); line-height: 1.4; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .otp-input-group { display: flex; gap: 4px; align-items: center; }
+        .otp-input-group input { width: 70px; letter-spacing: 2px; font-weight: 700; text-align: center; }
+
+        /* --- Badges --- */
+        .badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+        .badge-info { background: rgba(59, 130, 246, 0.1); color: var(--accent-blue); }
+        .badge-success { background: rgba(16, 185, 129, 0.1); color: var(--accent-green); }
+
+        /* --- Modals --- */
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8);
+            backdrop-filter: blur(8px);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            visibility: hidden;
+            opacity: 0;
+            transition: 0.3s;
+        }
+        .modal-overlay.active { visibility: visible; opacity: 1; }
+
+        /* STEP INDICATOR */
+        .status-steps {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 10px;
+            font-weight: 600;
+        }
+        .step-item {
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.05);
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+            white-space: nowrap;
+        }
+        .step-item.active {
+            background: rgba(59, 130, 246, 0.2);
+            color: var(--accent-blue);
+            border-color: var(--accent-blue);
+        }
+        .step-item.done {
+            background: rgba(16, 185, 129, 0.2);
+            color: var(--accent-green);
+            border-color: var(--accent-green);
+        }
+        .step-item.error {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--accent-red);
+            border-color: var(--accent-red);
+        }
+        .step-sep {
+            color: var(--text-secondary);
+            font-size: 8px;
+        }
         
-        #login-countdown { margin-left: auto; background: linear-gradient(90deg, #2563eb, #1e40af); color: #fff; font-size: 11px; font-weight: 700; padding: 4px 6px; border-radius: 999px; letter-spacing: .4px; display: flex; align-items: center; min-width: 45px; justify-content: center; }
-        
-        #retry-box { display: flex; align-items: center; justify-content: space-between; gap: 5px; background: #020617; border: 1px solid #334155; border-radius: 8px; padding: 6px 8px; }
-        #retry-box select { background: #0f172a; color: #e5e7eb; border: 1px solid #334155; border-radius: 6px; padding: 4px 6px; font-size: 12px; }
-        #retry-toggle { padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; cursor: pointer; transition: 0.2s; min-width: 60px; text-align: center; }
-        #retry-toggle.on { background: #16a34a; color: #fff; }
-        #retry-toggle.off { background: #dc2626; color: #fff; }
-        #retry-mode { padding: 4px 6px; border-radius: 999px; font-size: 11px; font-weight: 700; cursor: pointer; transition: 0.2s; min-width: 30px; text-align: center; }
-        #retry-mode option { background: #0f172a; color: #fff; font-weight: 600; }
-        
-        fieldset.paymentInfo { border: 1px solid #334155; border-radius: 6px; padding: 8px; margin-top: 8px; }
-        fieldset.paymentInfo legend { font-weight: bold; font-size: 13px; }
-        
-        .password-wrapper { position: relative; flex: 1; min-width: 80px; }
-        .password-wrapper input { width: 100%; padding-right: 40px; box-sizing: border-box; }
-        .eye-icon { position: absolute; right: 10px; top: 0; height: 100%; display: flex; align-items: center; cursor: pointer; }
-        
-        #bd-clock { font-size: 18px; font-weight: 600; font-family: monospace; text-align: center; padding: 5px 12px; border: 1px solid rgba(255, 255, 255, 0.35); border-radius: 8px; background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(4px); box-shadow: 0 2px 6px rgba(0,0,0,0.3), 0 0 6px rgba(255,255,255,0.15); }
-        
-        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; background: rgba(0, 0, 0, 0.75); z-index: 1000000; backdrop-filter: blur(2px); }
-        .modal-overlay.hidden { display: none; }
-        .modal-content { background: #0f172a; border: 1px solid #334155; border-radius: 12px; padding: 15px; width: 280px; color: #f8fafc; font-size: 13px; box-shadow: 0 10px 25px rgba(0,0,0,.6); }
-        .modal-content h3 { margin: 0 0 12px 0; font-size: 15px; border-bottom: 1px solid #334155; padding-bottom: 6px; }
-        .modal-content .col { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
-        .modal-content select, .modal-content input { background: #020617; color: #e5e7eb; border: 1px solid #334155; border-radius: 6px; padding: 7px; width: 100%; box-sizing: border-box; }
-        .modal-content select { outline: none; }
-        
-        .step { color: #475569; font-weight: 600; font-size: 11px; transition: 0.3s; flex: 1; text-align: center; }
-        .step.active { color: #3b82f6; text-shadow: 0 0 5px rgba(59,130,246,0.3); }
-        .step.done { color: #10b981; }
-        .spin { animation: spin 1s linear infinite; display: inline-block; font-size: 12px; }
-        .spinner-svg { animation: spin 1s linear infinite; display: inline-block; width: 12px; height: 12px; vertical-align: middle; margin-right: 4px; }
-        .spinner-svg circle { stroke: currentColor; stroke-width: 3; stroke-dasharray: 1, 200; stroke-dashoffset: 0; animation: spin-dash 1.5s ease-in-out infinite, spin-color 6s ease-in-out infinite; stroke-linecap: round; fill: none; }
-        @keyframes spin { 100% { transform: rotate(360deg); } }
-        @keyframes spin-dash { 0% { stroke-dasharray: 1, 200; stroke-dashoffset: 0; } 50% { stroke-dasharray: 89, 200; stroke-dashoffset: -35px; } 100% { stroke-dasharray: 89, 200; stroke-dashoffset: -124px; } }
-    
-        /* LOGIN PAGE CSS */
-        #login-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #020617; z-index: 2000000; display: flex; justify-content: center; align-items: center; transition: opacity 0.5s ease, backdrop-filter 0.5s ease; backdrop-filter: blur(10px); }
-        .login-card { background: rgba(11, 18, 32, 0.85); border: 1px solid rgba(51, 65, 85, 0.5); border-radius: 16px; padding: 40px 30px; width: 340px; box-shadow: 0 30px 60px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.05); text-align: center; backdrop-filter: blur(20px); transform: translateY(0); transition: 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
-        .login-title { margin: 0 0 6px 0; color: #f8fafc; font-size: 22px; font-weight: 700; letter-spacing: 0.5px; }
-        .login-subtitle { color: #64748b; font-size: 13px; margin-bottom: 28px; }
-        .login-card input { width: 100%; padding: 14px; margin-bottom: 14px; box-sizing: border-box; background: rgba(2, 6, 23, 0.6); color: #e5e7eb; border: 1px solid #1e293b; border-radius: 8px; outline: none; transition: 0.3s border, 0.3s background; font-size: 14px; font-weight: 500; text-align: center; letter-spacing: 0.5px; }
-        .login-card input:focus { border-color: #3b82f6; background: rgba(2, 6, 23, 0.9); box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15); }
-        .btn-login { width: 100%; padding: 14px; border-radius: 8px; border: none; font-size: 14px; font-weight: 700; cursor: pointer; color: #fff; background: linear-gradient(135deg, #2563eb, #1e40af); transition: 0.3s all; margin-top: 8px; letter-spacing: 0.5px; text-transform: uppercase; }
-        .btn-login:hover { box-shadow: 0 8px 20px rgba(37, 99, 235, 0.4); transform: translateY(-2px); }
-        .btn-login:active { transform: translateY(0); }
+        .modal-content {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            width: 400px;
+            max-width: 90%;
+            padding: 24px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            transform: translateY(20px);
+            transition: 0.3s;
+        }
+        .modal-overlay.active .modal-content { transform: translateY(0); }
+        .modal-header { margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
+        .modal-title { font-size: 18px; font-weight: 700; }
+        .modal-body { display: flex; flex-direction: column; gap: 16px; }
+        .form-item { display: flex; flex-direction: column; gap: 6px; }
+        .form-item label { font-size: 12px; color: var(--text-secondary); font-weight: 600; }
+
+        /* --- Log Viewer --- */
+        .log-modal { width: 800px; max-width: 95%; height: 600px; display: flex; flex-direction: column; }
+        .log-content {
+            flex: 1;
+            background: #020617;
+            border-radius: 8px;
+            padding: 16px;
+            overflow-y: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            color: #10b981;
+            margin-bottom: 16px;
+            border: 1px solid var(--border);
+        }
+
+        /* --- Login Overlay --- */
+        #login-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: var(--bg-main); z-index: 2000;
+            display: flex; justify-content: center; align-items: center;
+        }
+        .login-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 40px;
+            width: 360px;
+            text-align: center;
+            box-shadow: 0 50px 100px rgba(0,0,0,0.5);
+        }
     </style>
 </head>
 <body>
 
-<!-- LOGIN OVERLAY -->
-<div id="login-overlay">
-  <div class="login-card" id="login-card">
-    <h2 class="login-title">Sniper Panel Login</h2>
-    <p class="login-subtitle">Secure System Authentication</p>
-    <form onsubmit="return false;">
-      <input type="text" id="panel-user" placeholder="Username" autocomplete="username">
-      <input type="password" id="panel-pass" placeholder="Password" autocomplete="current-password">
-      <button id="login-btn" class="btn-login">Sign In</button>
-    </form>
-    <div id="login-error" style="color: #ef4444; font-size: 13px; margin-top: 14px; display: none; font-weight: 500; animation: fadeIn 0.3s;">Incorrect credentials</div>
-  </div>
-</div>
-
-<div id="app-container">
-
-<div id="ivac-panel">
-    <div id="ivac-head">
-      <span>IVAC Sniper V2 Panel</span>
-      <div style="display: flex; gap: 3px; align-items: center;">
-        <div class="tabs" style="display: flex; gap: 5px;">
-          <div class="tab" id="DnsSetting" title="DNS & Direct API Settings" style="background:#0f172a; padding:5px; border-radius:4px; font-size:12px; cursor:pointer;" onmouseover="this.style.background='#1e293b'" onmouseout="this.style.background='#0f172a'">⚙️</div>
-          <div class="tab" id="CapSetting" title="Captcha Settings">🛠️</div>
-          <div class="tab" id="ProxySetting" title="Proxy Settings" style="background:#0f172a; padding:5px; border-radius:4px; font-size:12px; cursor:pointer;" onmouseover="this.style.background='#1e293b'" onmouseout="this.style.background='#0f172a'">🌐</div>
+    <!-- LOGIN OVERLAY -->
+    <div id="login-overlay">
+        <div class="login-card">
+            <h1 class="logo" style="font-size: 28px; margin-bottom: 10px;">IVAC SNIPER PRO</h1>
+            <p style="color: var(--text-secondary); margin-bottom: 30px;">System Authentication</p>
+            <div class="modal-body">
+                <input type="text" id="panel-user" placeholder="Username" style="text-align: center; font-size: 14px; padding: 12px;">
+                <input type="password" id="panel-pass" placeholder="Password" style="text-align: center; font-size: 14px; padding: 12px;">
+                <button id="login-btn" class="btn btn-primary" style="justify-content: center; padding: 12px;">SIGN IN</button>
+                <p id="login-error" style="color: var(--accent-red); font-size: 12px; display: none;">Invalid credentials</p>
+            </div>
         </div>
-        <div id="login-countdown" style="display:none;">00:00</div>
-      </div>
     </div>
-    <div id="ivac-body">
-      <div id="bd-clock">12:00:00 AM</div>
-      <div id="status"></div>
-      
-      <div id="retry">
-           <div id="retry-box">
-              <div style="display:flex;align-items:center;gap:5px;">
-                <span style="font-size:12px;">RETRY</span>
-                <select id="retry-select">
-                  <option value="1">1 Sec</option>
-                  <option value="3">3 Sec</option>
-                  <option value="5">5 Sec</option>
-                  <option value="10">10 Sec</option>
-                  <option value="20" selected>20 Sec</option>
-                </select>
-              </div>
-              <div id="retry-toggle" class="on">AUTO ON</div>
-              <select id="retry-mode" style="background:#1d4ed8; color:#fff; border:none; border-radius:6px; padding:4px; font-size:11px; font-weight:700; cursor:pointer; outline:none; text-align:center;">
-                  <option value="1">1X Mode</option>
-                  <option value="2">2X Mode</option>
-                  <option value="3">3X Mode</option>
-                  <option value="4">4X Mode</option>
-                  <option value="5" selected>5X Mode</option>
-                  <option value="8">8X Mode</option>
-                  <option value="10">10X Mode</option>
-                  <option value="12">12X Mode</option>
-                  <option value="15">15X Mode</option>
-              </select>
-           </div>
-           
-           <div style="display:flex; align-items:center; gap:5px; margin-top:5px; padding:6px; background:#0f172a; border-radius:6px; border:1px solid #1e293b;">
-                <span style="font-size:11px; color:#94a3b8;">PROXY</span>
-                <select id="proxy-select" style="background:#020617; color:#d3d3d3; border:1px solid #334155; padding:4px; border-radius:4px; font-size:11px; outline:none;">
-                   <option value="native">Native Direct</option>
-                   <option value="random">Random Rotation</option>
-                </select>
-                <span style="color:#334155; margin:0 2px;">|</span>
-                <span style="font-size:11px; color:#94a3b8; white-space:nowrap;">RETRY MODE</span>
-                <select id="retry-logic" style="flex:1; background:#020617; color:#d2d2d2; border:1px solid #334155; padding:4px; border-radius:4px; font-size:11px; outline:none;">
-                   <option value="onFail" selected>OnFailRetry</option>
-                   <option value="batch">BatchRetry</option>
+
+    <!-- GLOBAL SETTINGS BAR -->
+    <header class="top-bar">
+        <div class="logo">IVAC SNIPER PRO</div>
+        
+        <div class="settings-group">
+            <div class="setting-item">
+                <span class="setting-label">Retry</span>
+                <select id="global-retry-sec">
+                    <option value="1">1s</option>
+                    <option value="3">3s</option>
+                    <option value="5">5s</option>
+                    <option value="10">10s</option>
+                    <option value="20" selected>20s</option>
                 </select>
             </div>
-      </div>
-      
-      <div id="signinTab">
-        <div class="row">
-           <div class="login-type" id="autoSchedulerRow">
-           </div>
+            <div class="setting-item">
+                <span class="setting-label">Mode</span>
+                <select id="global-retry-mode">
+                    <option value="1">1X</option>
+                    <option value="3">3X</option>
+                    <option value="5" selected>5X</option>
+                    <option value="10">10X</option>
+                    <option value="15">15X</option>
+                </select>
+            </div>
+            <div class="setting-item">
+                <span class="setting-label">Network</span>
+                <select id="global-proxy-select">
+                    <option value="native">Native Direct</option>
+                    <option value="random">Rotation Mode</option>
+                </select>
+            </div>
+            <div class="setting-item">
+                <span class="setting-label">Strategy</span>
+                <select id="global-retry-logic">
+                    <option value="onFail">OnFail</option>
+                    <option value="batch" selected>Batch</option>
+                </select>
+            </div>
         </div>
-        <div class="row">
-              <input id="email" placeholder="Registered Email Address">
-        </div>
-        <div class="row" id="mobileRow">
-          <input id="mb" placeholder="Mobile">
-          <div class="password-wrapper">
-            <input id="mbpass" placeholder="Login Password" type="password">
-            <span id="togglePassword" class="eye-icon">👁</span>
-          </div>
-        </div>
-        
-        <div id="step-indicator" style="display:flex; justify-content:space-between; margin: 4px 0; padding: 6px 8px; background: #0f172a; border-radius: 6px; border: 1px solid #334155;">
-           <span id="step-sendOtp" class="step">SendOTP</span>
-           <span id="step-verifyOtp" class="step">Verify</span>
-           <span id="step-reserveSlot" class="step">Reserve</span>
-           <span id="step-payNow" class="step">PayNow</span>
-        </div>
-            
-        <div class="row">
-          <input id="otp" maxlength="6" placeholder="OTP">
-          <button class="btn-otp" id="getOtp">Get OTP</button>
-          <button class="btn-sms" id="smsList">SMS List</button>
-        </div>
-        <div class="row">
-          <button class="btn-send" id="sendOtp" style="flex:1;">Send OTP</button>
-          <button id="reserveOtpBtn" style="flex:1; background: linear-gradient(90deg, #f59e0b, #d97706); color: #fff; padding: 7px 10px; border-radius: 6px; border: none; font-size: 12px; cursor: pointer; flex-shrink: 0;">Reserve OTP</button>
-          <button class="btn-verify" id="verifyOtp" style="flex:1;">Verify OTP</button>
-        </div>
-        <div class="row">
-          <button class="btn-save" id="saveInfo" style="flex:1;">Save Info</button>
-          <button class="btn-otp" id="clearInfo" style="flex:1; background: linear-gradient(90deg, #64748b, #475569); color: #fff; padding: 7px 10px; border-radius: 6px; border: none; font-size: 12px; cursor: pointer;">Clear Info</button>
-          <button class="btn-payNow" id="stopAll" style="flex: 1; padding: 7px 10px; font-weight: bold; border-radius: 6px; border: none; font-size: 12px; cursor: pointer;">Stop All</button>
-        </div>
-        
-        <fieldset class="paymentInfo">
-          <legend>Payment Info</legend>
-          <div class="row">
-            <button class="btn-checkSlot" id="checkFile" style="flex:1;">Check File</button>
-            <button class="btn-reserveSlot" id="reserveSlot" style="flex:1;">Reserve Slot</button>
-            <button class="btn-payNow" id="payNow" style="flex:1;">Pay Now</button>
-          </div>
-          <br>
-          <div id="link-btn" align="center">Developed By @TechBro</div>
-        </fieldset>
-      </div>
-    </div> <!-- end ivac-body -->
-  </div> <!-- end ivac-panel -->
 
-  <div id="console-panel">
-      <div id="ivac-head" style="border-radius: 12px 12px 0 0; background: linear-gradient(90deg, #1e293b, #0f172a); border-bottom: 1px solid #334155; padding: 12px 15px; display: flex; justify-content: space-between; align-items: center;">
-          <span style="font-size: 14px; font-weight: 600; letter-spacing: 0.5px; display: flex; align-items: center; gap: 8px; color: #e2e8f0;">
-              <span style="display:inline-block; width:8px; height:8px; background:#10b981; border-radius:50%; box-shadow: 0 0 8px #10b981;"></span>
-              System Engine Logs
-          </span>
-          <div style="display: flex; gap: 6px;">
-             <button id="export-session-btn" style="display:none; background:linear-gradient(90deg, #8b5cf6, #6d28d9); color:#fff; border:none; border-radius:4px; padding:4px 8px; font-size:10px; cursor:pointer; font-weight:bold; transition:0.2s; box-shadow:0 0 5px rgba(139,92,246, 0.5);">📤 Export Session</button>
-             <button id="git-update-btn" style="background:linear-gradient(90deg, #059669, #10b981); color:#fff; border:none; border-radius:4px; padding:4px 8px; font-size:10px; cursor:pointer; font-weight:bold; transition:0.2s; box-shadow:0 0 5px rgba(16,185,129, 0.5);">📥 Update</button>
-             <button id="hard-reset-btn" style="background:linear-gradient(90deg, #2563eb, #1d4ed8); color:#fff; border:none; border-radius:4px; padding:4px 8px; font-size:10px; cursor:pointer; font-weight:bold; transition:0.2s; box-shadow:0 0 5px rgba(37,99,235, 0.5);">🔄 Restart Server</button>
-          </div>
-      </div>
-      <div id="solver-container">
-          <div id="solver-console">> Console Is Ready.<br></div>
-      </div>
-      <div style="background: linear-gradient(90deg, #0b1220, #0f172a); padding: 12px 15px; border-radius: 0 0 12px 12px; display: flex; align-items: center; border-top: 1px solid #1e293b;">
-          <button id="console-payment-btn" style="display: none; background: #16a34a; color: #fff; border: none; border-radius: 6px; padding: 6px 15px; font-size: 12px; font-weight: bold; cursor: pointer; transition: 0.2s; align-items: center; gap: 5px; box-shadow: 0 2px 8px rgba(22,163,74,0.2);">💳 Open Payment Link</button>
-          <button id="solver-clear" style="margin-left: auto;">🗑️ Clear Logs</button>
-      </div>
-  </div>
-
-</div> <!-- end app-container -->
-
-<div id="proxyModal" class="modal-overlay hidden" style="backdrop-filter: blur(8px);">
-  <div class="modal-content" style="width: 450px; max-width: 95%;">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; border-bottom: 1px solid #334155; padding-bottom: 10px;">
-        <h3 style="margin: 0; color: #fff;">🌐 Proxy Manager</h3>
-        <span id="closeProxyBtn" style="cursor: pointer; color: #ef4444; font-weight: bold; padding: 2px 8px; border-radius: 4px; background: rgba(239, 68, 68, 0.1);">Close ✖</span>
-    </div>
-    
-    <div style="background: #020617; padding: 12px; border-radius: 8px; border: 1px solid #1e293b; margin-bottom: 15px;">
-        <div style="display: flex; gap: 10px; margin-bottom: 14px;">
-            <div style="flex: 1;"><label style="font-size: 14px; color: #94a3b8; display: block; margin-bottom: 4px;">Proxy Title</label><input type="text" id="proxyTitle" placeholder="e.g. Server 1" style="width: 100%; box-sizing: border-box;"></div>
-            <div style="flex: 1;"><label style="font-size: 14px; color: #94a3b8; display: block; margin-bottom: 4px;">Host / IP</label><input type="text" id="proxyHost" placeholder="127.0.0.1" style="width: 100%; box-sizing: border-box;"></div>
-            <div style="flex: 0.5;"><label style="font-size: 14px; color: #94a3b8; display: block; margin-bottom: 4px;">Port</label><input type="number" id="proxyPort" placeholder="8080" style="width: 100%; box-sizing: border-box;"></div>
+        <div class="settings-group">
+            <div class="setting-item">
+                <span class="setting-label">Auto HIT</span>
+                <button id="global-auto-toggle" class="badge badge-success" style="border:none; cursor:pointer;">ENABLED</button>
+            </div>
+            <div class="setting-item">
+                <span class="setting-label">Hit Time (BD)</span>
+                <input type="text" id="global-hit-time" value="17:00:00" style="width: 80px; text-align: center;">
+            </div>
         </div>
-        <div style="display: flex; gap: 10px; margin-bottom: 10px;">
-            <div style="flex: 1;"><label style="font-size: 14px; color: #94a3b8; display: block; margin-bottom: 4px;">Username (opt)</label><input type="text" id="proxyUser" placeholder="Optional" style="width: 100%; box-sizing: border-box;"></div>
-            <div style="flex: 1;"><label style="font-size: 14px; color: #94a3b8; display: block; margin-bottom: 4px;">Password (opt)</label><input type="text" id="proxyPass" placeholder="Optional" style="width: 100%; box-sizing: border-box;"></div>
+
+        <div class="settings-group" style="padding: 4px 8px;">
+            <button class="btn btn-ghost" id="btn-dns-settings" title="DNS Config">⚙️</button>
+            <button class="btn btn-ghost" id="btn-cap-settings" title="Captcha Config">🛠️</button>
+            <button class="btn btn-primary" id="btn-update" style="padding: 4px 10px; font-size: 10px;">🚀 UPDATE</button>
+            <button class="btn btn-danger" id="btn-restart" style="padding: 4px 10px; font-size: 10px;">🔄 RESTART</button>
         </div>
-        <button id="addProxyBtn" style="width: 100%; background: #3b82f6; color: white; padding: 8px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold;">+ Add HTTP Proxy</button>
+
+        <div class="clock-container">
+            <div id="bd-clock">12:00:00 AM</div>
+            <div style="font-size: 10px; color: var(--text-secondary); font-weight: 700;">BANGLADESH TIME</div>
+        </div>
+    </header>
+
+    <main class="main-content">
+        <div class="section-header">
+            <h2 style="font-size: 20px; font-weight: 700;">Task Management</h2>
+            <div style="display: flex; gap: 8px;">
+                <button class="btn btn-success" id="btn-start-all" style="padding: 6px 12px; font-size: 11px;">▶ START ALL</button>
+                <button class="btn btn-warning" id="btn-reset-all" style="padding: 6px 12px; font-size: 11px;">🔄 RESET ALL</button>
+                <button class="btn btn-danger" id="btn-stop-all-global" style="padding: 6px 12px; font-size: 11px;">⏹ STOP ALL</button>
+                <button class="btn btn-primary" id="btn-add-profile" style="padding: 6px 12px; font-size: 11px;">+ Add Profile</button>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <table id="task-table">
+                <thead>
+                    <tr>
+                        <th width="10%">Task Name</th>
+                        <th width="14%">Identity</th>
+                        <th width="12%">OTP</th>
+                        <th width="10%">Session</th>
+                        <th width="18%">Step Progress</th>
+                        <th width="15%">Status Message</th>
+                        <th width="8%">Payment</th>
+                        <th width="18%">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="task-list">
+                    <!-- Dynamic Rows Here -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- SYSTEM CONSOLE -->
+        <div style="margin-top: 24px;">
+            <div class="section-header" style="margin-bottom: 8px;">
+                <h3 style="font-size: 14px; font-weight: 700; color: var(--text-secondary);">System Console</h3>
+                <button class="btn btn-ghost" style="padding: 4px 8px; font-size: 10px;" onclick="$('system-logs').innerHTML = ''">Clear Console</button>
+            </div>
+            <div id="system-logs" style="background: #020617; border: 1px solid var(--border); border-radius: 8px; height: 150px; overflow-y: auto; padding: 12px; font-family: 'JetBrains Mono', monospace; font-size: 11px; line-height: 1.6;">
+                <div style="color: var(--accent-blue);">System initialized. Monitoring active...</div>
+            </div>
+        </div>
+    </main>
+
+    <!-- MODAL: ADD PROFILE -->
+    <div id="modal-profile" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">Create New Profile</h3>
+                <button class="btn-ghost" style="border:none; font-size: 20px;" onclick="closeModal('modal-profile')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-item">
+                    <label>Profile Name</label>
+                    <input type="text" id="p-name" placeholder="e.g. Shuvo-01">
+                </div>
+                <div class="form-item">
+                    <label>Email Address</label>
+                    <input type="text" id="p-email" placeholder="email@example.com">
+                </div>
+                <div class="form-item">
+                    <label>Mobile Number</label>
+                    <input type="text" id="p-mobile" placeholder="017XXXXXXXX">
+                </div>
+                <div class="form-item">
+                    <label>Password</label>
+                    <input type="password" id="p-pass" placeholder="IVAC Password">
+                </div>
+                <button class="btn btn-primary" id="btn-save-profile" style="margin-top: 10px; justify-content: center;">Create Task</button>
+            </div>
+        </div>
     </div>
 
-    <div id="proxyListContainer" style="max-height: 200px; overflow-y: auto; background: #0f172a; border-radius: 6px; padding: 10px; border: 1px solid #1e293b;">
-        <span style="color: #64748b; font-size: 12px; display: block; text-align: center;">No proxies mapped.</span>
+    <!-- MODAL: LOG VIEWER -->
+    <div id="modal-logs" class="modal-overlay">
+        <div class="modal-content log-modal">
+            <div class="modal-header">
+                <h3 class="modal-title" id="log-title">Profile Logs</h3>
+                <div style="display: flex; gap: 8px;">
+                    <button class="btn btn-ghost" id="btn-clear-log">Clear</button>
+                    <button class="btn-ghost" style="border:none; font-size: 20px;" onclick="closeModal('modal-logs')">&times;</button>
+                </div>
+            </div>
+            <div class="log-content" id="log-body">
+                <!-- Log content here -->
+            </div>
+        </div>
     </div>
-  </div>
-</div>
 
-<div id="sessionModal" class="modal-overlay hidden" style="backdrop-filter: blur(8px);">
-  <div class="modal-content" style="width: 400px; max-width: 95%;">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; border-bottom: 1px solid #334155; padding-bottom: 10px;">
-        <h3 style="margin: 0; color: #fff;">💾 Export Session Data</h3>
-        <span id="closeSessionBtn" style="cursor: pointer; color: #ef4444; font-weight: bold; padding: 2px 8px; border-radius: 4px; background: rgba(239, 68, 68, 0.1);">Close ✖</span>
+    <!-- MODAL: DNS/CAPTCHA/PROXY SETTINGS -->
+    <div id="modal-settings" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title" id="settings-title">System Settings</h3>
+                <button class="btn-ghost" style="border:none; font-size: 20px;" onclick="closeModal('modal-settings')">&times;</button>
+            </div>
+            <div class="modal-body" id="settings-body">
+                <!-- Dynamic settings form -->
+            </div>
+            <button class="btn btn-primary" id="btn-save-settings" style="margin-top: 20px; justify-content: center;">Save Changes</button>
+        </div>
     </div>
-    
-    <div style="background: #020617; padding: 12px; border-radius: 8px; border: 1px solid #1e293b; margin-bottom: 15px;">
-        <textarea id="sessionDataText" readonly style="width: 100%; height: 200px; background: #0b1220; color: #34d399; font-family: monospace; font-size: 11px; border: 1px solid #334155; border-radius: 6px; padding: 8px; resize: none; box-sizing: border-box;"></textarea>
-         <button id="copySessionBtn" style="width: 100%; margin-top: 10px; background: #10b981; color: white; padding: 8px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; transition: 0.2s;">📋 Copy to Clipboard</button>
-    </div>
-  </div>
-</div>
 
-<div id="captchaModal" class="modal-overlay hidden">
-  <div class="modal-content">
-    <h3>Captcha API Settings</h3>
-    <div class="col">
-      <label>API Provider:</label>
-      <select id="capProvider">
-        <option value="capSolver">CapSolver</option>
-        <option value="capMonster">CapMonster</option>
-      </select>
+    <!-- MODAL: RESERVATION SUCCESS -->
+    <div id="modal-success" class="modal-overlay">
+        <div class="modal-content" style="text-align: center; max-width: 400px; padding: 30px;">
+            <div style="font-size: 60px; margin-bottom: 15px;">🎉</div>
+            <h2 style="color: #10b981; font-size: 24px; font-weight: 800; margin-bottom: 10px;">RESERVED!</h2>
+            <p style="color: var(--text-secondary); margin-bottom: 20px;">Task: <span id="success-task-name" style="color: var(--text-primary); font-weight: 700;"></span></p>
+            <div style="display: flex; flex-direction: column; gap: 10px;">
+                <button class="btn btn-primary" onclick="closeModal('modal-success')" style="width: 100%; justify-content: center; font-size: 16px; padding: 12px;">OK, CLOSE</button>
+            </div>
+        </div>
     </div>
-    <div class="col">
-      <label>API Key:</label>
-      <input type="text" id="capKey" placeholder="Enter your API Key">
-    </div>
-    <div class="row" style="justify-content: flex-end; gap: 10px; margin-top: 15px;">
-      <button id="capCancel" class="btn-verify" style="flex:unset;">Cancel</button>
-      <button id="capSave" class="btn-save" style="flex:unset;">Save</button>
-    </div>
-  </div>
-</div>
 
-<div id="dnsModal" class="modal-overlay hidden">
-  <div class="modal-content" style="width: 320px;">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #334155; padding-bottom: 8px;">
-        <h3 style="margin: 0; color: #fff; font-size: 15px;">⚙️ DNS Engine Settings</h3>
-        <span id="closeDnsBtn" style="cursor: pointer; color: #ef4444; font-weight: bold; font-size: 16px;">&times;</span>
-    </div>
-    <div class="col" style="margin-bottom: 10px;">
-      <label style="color: #94a3b8; font-size: 12px; margin-bottom: 5px; display: block;">DNS IP (api.ivacbd.com → IP):</label>
-      <input type="text" id="dnsIpInput" placeholder="35.154.198.180" style="background: #020617; color: #e5e7eb; border: 1px solid #334155; border-radius: 6px; padding: 9px 10px; width: 100%; box-sizing: border-box; font-family: monospace; font-size: 13px; letter-spacing: 0.5px;">
-      <p style="font-size: 11px; color: #64748b; margin-top: 5px; line-height: 1.4;">
-        * Direct AWS ALB IP — bypasses Cloudflare<br>
-        * Default: <span id="dnsDefaultIpLabel" style="color: #3b82f6;">35.154.198.180</span> (from dnsconfig.js)
-      </p>
-    </div>
-    <div class="col">
-      <label style="color: #94a3b8; font-size: 12px; margin-bottom: 5px; display: block;">DNS Map Mode:</label>
-      <select id="directApiSelect" style="background: #020617; color: #e5e7eb; border: 1px solid #334155; border-radius: 6px; padding: 10px; width: 100%; cursor: pointer;">
-        <option value="false">Enable (dnsMap Active)</option>
-        <option value="true">Disable (Direct API Mode)</option>
-      </select>
-      <p style="font-size: 11px; color: #64748b; margin-top: 8px; line-height: 1.4;">
-        * Enable = directApi: false (Uses IP above)<br>
-        * Disable = directApi: true (Direct hostname)
-      </p>
-    </div>
-    <div class="row" style="justify-content: flex-end; gap: 10px; margin-top: 15px;">
-      <button id="dnsSave" class="btn-save" style="flex:1; padding: 10px;">Update Engine</button>
-    </div>
-  </div>
-</div>
-
-<script src="/socket.io/socket.io.js"></script>
-<script src="/script.js?v=2"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="script.js"></script>
 </body>
 </html>
