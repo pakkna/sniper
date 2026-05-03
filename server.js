@@ -877,14 +877,14 @@ async function sendOtp(pState, retrySettings, oldOtpBoxValue = null, isManual = 
         const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
         const onFail = (waitMs, reuseToken = null, reuseTokenTime = null) => {
             if (!retrySettings?.enabled) return;
-            if (retrySettings.logic === "batch" && activeCount > 1) {
+            if ((retrySettings.logic === "batch" || retrySettings.logic === "single-batch") && activeCount > 1) {
                 sendOtpBatchTokenMap.push({ token: reuseToken, time: reuseTokenTime });
                 batchFailed++;
                 if (batchFailed === activeCount && !successTriggered) {
                     batchFailed = 0;
                     const tokenSnapshot = [...sendOtpBatchTokenMap];
                     sendOtpBatchTokenMap = [];
-                    logProfile(pState, `[Batch] All ${activeCount} workers failed. Retrying...`, "#fbbf24");
+                    logProfile(pState, `[${retrySettings.logic}] All ${activeCount} workers failed. Retrying...`, "#fbbf24");
                     TaskManager.setTimeout(taskName, () => sendOtp(pState, retrySettings, oldOtpBoxValue, false, tokenSnapshot), 1000);
                 }
             } else {
@@ -920,7 +920,7 @@ async function sendOtp(pState, retrySettings, oldOtpBoxValue = null, isManual = 
                 TaskManager.stopTask(taskName);
                 pState.steps.signin = 'done';
                 pState.steps.verify = 'active';
-                logProfile(pState, `Signin successful. Check OTP in Box.`, "#10b981", data);
+                logProfile(pState, `SendOTP successfully.Searching..`, "#10b981", data);
 
                 pState.flags.isReserveStarted = false;
                 pState.flags.isOtpVerifyAggressive = false;
@@ -958,8 +958,9 @@ async function sendOtp(pState, retrySettings, oldOtpBoxValue = null, isManual = 
                 else if ([500, 501, 502, 504].includes(response.statusCode)) waitMs = 1500 + Math.floor(Math.random() * 500);
 
                 if (response.statusCode === 429) {
-                    logProfile(pState, `SendOTP 429: ${data?.message}. Searching OTP...`, "#fbbf24");
-                    reserveOtp(pState, retrySettings, false);
+                    logProfile(pState, `SendOTP 429: ${data?.message || "OTP limit reached."}.`, "#ef4444", data);
+                    TaskManager.stopTask(taskName);
+                    pState.steps.signin = 'idle';
                     return;
                 }
 
@@ -980,12 +981,29 @@ async function sendOtp(pState, retrySettings, oldOtpBoxValue = null, isManual = 
         }
     };
 
-    let baseWorkers = isManual ? 1 : ((retrySettings?.mode > 1) ? parseInt(retrySettings.mode, 10) || 1 : 1);
-    let numWorkers = (baseWorkers > 5) ? 5 : baseWorkers; // CAP Send OTP at 5
+    const isRunning = TaskManager.tasks[taskName]?.controllers.size > 0;
+    let numWorkers;
+    if (isManual && isRunning) {
+        numWorkers = 1;
+    } else {
+        let base = parseInt(retrySettings?.mode, 10) || 1;
+        numWorkers = (base > 5) ? 5 : base;
+    }
     activeCount = numWorkers;
 
-    if (isManual) {
+    const isSingleBatch = retrySettings?.logic === "single-batch";
+    const hasReusable = batchTokens && batchTokens.some(t => t.token);
+
+    if (isManual && isRunning) {
         trySend(pState.workerCounts.sendOtp + 1, 0);
+    } else if (isSingleBatch && !hasReusable) {
+        logProfile(pState, "[Single-Batch] Solving one captcha for all workers...", "#3b82f6");
+        const solveRes = await solveAggressive(pState);
+        if (!solveRes) { logProfile(pState, "Captcha solve failed for batch", "#ef4444"); return; }
+        for (let i = 1; i <= numWorkers; i++) {
+            const delay = (i === 1) ? 0 : ((i - 1) * (Math.floor(Math.random() * 201) + 150));
+            trySend(i, delay, solveRes.token, solveRes.time);
+        }
     } else {
         for (let i = 1; i <= numWorkers; i++) {
             const delay = (i === 1) ? 0 : ((i - 1) * (Math.floor(Math.random() * 201) + 150));
@@ -1062,11 +1080,11 @@ async function verifyOtpAggressive(pState, otp, retrySettings, isAutoRetry = fal
         const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
         const onFail = (waitMs) => {
             if (!retrySettings?.enabled) return;
-            if (retrySettings.logic === "batch" && activeCount > 1) {
+            if ((retrySettings.logic === "batch" || retrySettings.logic === "single-batch") && activeCount > 1) {
                 batchFailed++;
                 if (batchFailed === activeCount && !successTriggered) {
                     batchFailed = 0;
-                    logProfile(pState, `[Batch] All workers failed. Retrying Verify...`, "#fbbf24");
+                    logProfile(pState, `[${retrySettings.logic}] All workers failed. Retrying Verify...`, "#fbbf24");
                     TaskManager.setTimeout(taskName, () => verifyOtpAggressive(pState, otp, retrySettings, true), 1000);
                 }
             } else {
@@ -1109,18 +1127,18 @@ async function verifyOtpAggressive(pState, otp, retrySettings, isAutoRetry = fal
         }
     };
 
-    if ((!pState.flags.isOtpVerifyAggressive || isAutoRetry) && !isManual && retrySettings?.mode > 1) {
-        pState.flags.isOtpVerifyAggressive = true;
-        const numAutoWorkers = parseInt(retrySettings.mode, 10) || 3;
-        activeCount = numAutoWorkers;
-        for (let i = 1; i <= numAutoWorkers; i++) {
-            let delay = isAutoRetry ? ((i - 1) * 200) : (i === 1 ? 150 : (i - 1) * 1000);
-            worker(i, delay);
-        }
-    } else {
+    const isRunning = TaskManager.tasks[taskName]?.controllers.size > 0;
+    if (isManual && isRunning) {
         activeCount = 1;
         pState.workerCounts.verifyOtp++;
         worker(pState.workerCounts.verifyOtp, 0);
+    } else {
+        const numModeWorkers = parseInt(retrySettings?.mode, 10) || 1;
+        activeCount = numModeWorkers;
+        for (let i = 1; i <= numModeWorkers; i++) {
+            let delay = (i === 1) ? 0 : (i - 1) * 500;
+            worker(i, delay);
+        }
     }
 }
 
@@ -1316,14 +1334,14 @@ async function reserveSlotAggressive(pState, retrySettings, isAutoRetry = false,
         const wTag = `[W-${id}|${getNetworkTitle(id)}]`;
         const onFail = (waitMs, reuseToken = null, reuseTokenTime = null) => {
             if (!retrySettings?.enabled) return;
-            if (retrySettings.logic === "batch" && activeCount > 1) {
+            if ((retrySettings.logic === "batch" || retrySettings.logic === "single-batch") && activeCount > 1) {
                 batchTokenMap.push({ token: reuseToken, time: reuseTokenTime });
                 batchFailed++;
                 if (batchFailed === activeCount && !successTriggered) {
                     batchFailed = 0;
                     const tokenSnapshot = [...batchTokenMap];
                     batchTokenMap = [];
-                    logProfile(pState, `[Batch] All workers failed. Retrying Reserve Slot...`, "#fbbf24");
+                    logProfile(pState, `[${retrySettings.logic}] All workers failed. Retrying Reserve Slot...`, "#fbbf24");
                     TaskManager.setTimeout(taskName, () => reserveSlotAggressive(pState, retrySettings, true, false, tokenSnapshot), 1000);
                 }
             } else {
@@ -1397,14 +1415,35 @@ async function reserveSlotAggressive(pState, retrySettings, isAutoRetry = false,
         }
     };
 
-    let numWorkersToStart = isManual ? 1 : ((retrySettings?.mode > 1) ? parseInt(retrySettings.mode, 10) || 1 : 1);
+    const isRunning = TaskManager.tasks[taskName]?.controllers.size > 0;
+    let numWorkersToStart;
+    if (isManual && isRunning) {
+        numWorkersToStart = 1;
+    } else {
+        numWorkersToStart = parseInt(retrySettings?.mode, 10) || 1;
+    }
     activeCount = numWorkersToStart;
 
-    for (let i = 0; i < numWorkersToStart; i++) {
-        const batchToken = batchTokens ? (batchTokens[i]?.token || null) : null;
-        const batchTokenTime = batchTokens ? (batchTokens[i]?.time || null) : null;
-        const delay = i * 250;
-        worker(i + 1, delay, batchToken, batchTokenTime);
+    const isSingleBatch = retrySettings?.logic === "single-batch";
+    const hasReusable = batchTokens && batchTokens.some(t => t.token);
+
+    if (isSingleBatch && !hasReusable && (!isManual || !isRunning)) {
+        logProfile(pState, "[Single-Batch] Solving one captcha for all workers...", "#3b82f6");
+        let solveRes = await solveAggressive(pState);
+        if (!solveRes) { logProfile(pState, "Captcha solve failed for batch", "#ef4444"); return; }
+        const recapToken = encryptCaptchaToken(solveRes.token);
+        const tokenTime = solveRes.time;
+        for (let i = 0; i < numWorkersToStart; i++) {
+            const delay = i * 250;
+            worker(i + 1, delay, recapToken, tokenTime);
+        }
+    } else {
+        for (let i = 0; i < numWorkersToStart; i++) {
+            const batchToken = batchTokens ? (batchTokens[i]?.token || null) : null;
+            const batchTokenTime = batchTokens ? (batchTokens[i]?.time || null) : null;
+            const delay = i * 250;
+            worker(i + 1, delay, batchToken, batchTokenTime);
+        }
     }
 }
 
@@ -1455,7 +1494,17 @@ async function payNow(pState, retrySettings, isAutoRetry = false, isManual = fal
         }
     };
 
-    worker(1, 0);
+    const isRunning = TaskManager.tasks[taskName]?.controllers.size > 0;
+    let numWorkers;
+    if (isManual && isRunning) {
+        numWorkers = 1;
+    } else {
+        numWorkers = parseInt(retrySettings?.mode, 10) || 1;
+    }
+
+    for (let i = 1; i <= numWorkers; i++) {
+        worker(i, (i - 1) * 200);
+    }
 }
 
 // ==========================================
@@ -1479,6 +1528,22 @@ io.on("connection", (socket) => {
             sendOtp(pState, retrySettings, null, false);
         });
     });
+
+    socket.on("all-profiles-reserve-otp", secure((data) => {
+        const retrySettings = data?.retrySettings || {};
+        profileStates.forEach(pState => {
+            logProfile(pState, "[Auto-Hit] Pre-warmup: Sending Reserve OTP...", "#3b82f6");
+            reserveOtp(pState, retrySettings, true);
+        });
+    }));
+
+    socket.on("bulk-solve-captcha", secure(async (data) => {
+        const count = data?.count || 1;
+        logSolver(`[Auto-Hit] Pre-solving ${count} captchas for queue...`, "#3b82f6");
+        for (let i = 0; i < count; i++) {
+            queueToken(true);
+        }
+    }));
 
     socket.on("all-profiles-stop", () => {
         logSolver("📡 Received: GLOBAL STOP command", "#3b82f6");

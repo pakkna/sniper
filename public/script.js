@@ -212,11 +212,70 @@ function initUI() {
 }
 
 function initClock() {
+    let reserveOtpTriggered = false;
+    let captchaTriggered = false;
+    let mainHitTriggered = false;
+
     setInterval(() => {
-        const bdTime = new Date().toLocaleTimeString("en-US", { timeZone: "Asia/Dhaka", hour12: true });
+        const now = new Date();
+        const settings = getGlobalSettings();
+        
+        // Update UI Clock
+        const bdTime12 = now.toLocaleTimeString("en-US", { timeZone: "Asia/Dhaka", hour12: true });
         const clock = $("bd-clock");
-        if (clock) clock.innerText = bdTime;
-    }, 1000);
+        if (clock) clock.innerText = bdTime12;
+
+        if (!settings.enabled || !settings.hitTime) {
+            reserveOtpTriggered = false;
+            captchaTriggered = false;
+            mainHitTriggered = false;
+            return;
+        }
+
+        // Get Current Time in Bangladesh Parts
+        const bdNow = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Dhaka" }));
+        const bdH = bdNow.getHours();
+        const bdM = bdNow.getMinutes();
+        const bdS = bdNow.getSeconds();
+        const bdMs = now.getMilliseconds();
+
+        // Calculate Today's Target in MS
+        const [targetH, targetM, targetS] = settings.hitTime.split(":").map(Number);
+        
+        const currentTotalMs = (bdH * 3600 + bdM * 60 + bdS) * 1000 + bdMs;
+        const targetTotalMs = (targetH * 3600 + targetM * 60 + targetS) * 1000;
+        
+        let diff = targetTotalMs - currentTotalMs;
+
+        // Sequence Logic
+        // 1. 50,000 ms before hit -> Reserve OTP
+        if (diff <= 50000 && diff > 49000 && !reserveOtpTriggered) {
+            reserveOtpTriggered = true;
+            console.log(`[Auto-Hit] -50s: Sending Warmup OTPs`);
+            socket.emit("all-profiles-reserve-otp", { retrySettings: settings });
+        }
+
+        // 2. 30,000 ms before hit -> Pre-solve 5 captchas
+        if (diff <= 30000 && diff > 29000 && !captchaTriggered) {
+            captchaTriggered = true;
+            console.log(`[Auto-Hit] -30s: Pre-solving 5 captchas for queue`);
+            socket.emit("bulk-solve-captcha", { count: 5 });
+        }
+
+        // 3. 300 ms before hit -> Fire Main Start
+        if (diff <= 300 && diff > -500 && !mainHitTriggered) {
+            mainHitTriggered = true;
+            console.log(`[Auto-Hit] -300ms: HIT TRIGGERED! FIRING MAIN BATCH`);
+            socket.emit("all-profiles-start", { retrySettings: settings });
+        }
+
+        // Reset triggers for the next cycle (after 10s passed)
+        if (diff < -10000) {
+            reserveOtpTriggered = false;
+            captchaTriggered = false;
+            mainHitTriggered = false;
+        }
+    }, 100);
 }
 
 // --- MODAL HELPERS ---
