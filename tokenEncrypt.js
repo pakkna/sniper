@@ -1,6 +1,6 @@
 // ==================== CAPTCHA TOKEN ENCRYPTION ====================
 const CAPTCHA_CHARSET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_";  // 64 chars
-const CAPTCHA_SECRET = "AJ9G`0&%I:}RA8#2QQ03]U21Y1!RQc2wGP1M$2_(O>,XG0&4WW25;A43E3%XWi4c";  // 64 chars, real production key
+const CAPTCHA_SECRET = "A.reU8WIId;h4KO-Q3oEKvJ1Ys[_05J2G~xkA0COOj<n6QU{W5uKQbP3Ey|[27P4";  // 64 chars, real production key
 
 // c0() - Shift generator from official site (replaces old pt() hash function)
 // For each output position W (1..len), computes polynomial Σ(seed[i] * W^i) mod 67, then mod 64
@@ -23,7 +23,7 @@ function generateShifts(key, len) {
 }
 
 // f0() - Official encryption function
-export function encryptCaptchaToken(token, key = CAPTCHA_SECRET, skip = 7, encryptLen = 24) {
+export function encryptCaptchaToken(token, key = CAPTCHA_SECRET, skip = 10, encryptLen = 25) {
     if (!token) return token;
 
     const prefixLen = Math.max(0, Math.min(skip, token.length));
