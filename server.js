@@ -109,7 +109,8 @@ function logProfile(pState, msg, color = "#fff", json = null) {
         const logsDir = path.join(__dirname, "logs");
         if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir);
         const logFile = path.join(logsDir, `${pState.id}.log`);
-        fs.appendFileSync(logFile, logMsg + "\n");
+        // Use asynchronous append to prevent blocking the event loop under heavy load
+        fs.appendFile(logFile, logMsg + "\n", () => {});
     } catch (e) {}
 
     // 2. Broadcast to UI
@@ -151,9 +152,18 @@ let currentSessionToken = null;
 let sessionExpiry = 0;
 
 function generateSessionToken() {
-    currentSessionToken = Math.random().toString(36).substring(2) + Date.now().toString(36);
-    sessionExpiry = Date.now() + (5 * 60 * 60 * 1000); // 5 Hours exactly as requested
-    return currentSessionToken;
+    const token = Math.random().toString(36).substring(2) + Date.now().toString(36);
+    const expiry = Date.now() + (5 * 60 * 60 * 1000); // 5 Hours
+    
+    panelConfig.sessionToken = token;
+    panelConfig.sessionExpiry = expiry;
+    
+    // Persist to config so sessions survive server restarts/PM2 updates
+    try {
+        fs.writeFileSync(path.join(__dirname, "config.json"), JSON.stringify(panelConfig, null, 2));
+    } catch (e) {}
+    
+    return token;
 }
 
 let currentProxyState = { activeMode: "native", proxies: [] };
@@ -1514,10 +1524,19 @@ io.on("connection", (socket) => {
     socket.authenticated = false;
     console.log("UI Connected:", socket.id);
 
+    const secure = (handler) => (data, cb) => {
+        if (!socket.authenticated) {
+            socket.emit("status", { msg: "Unauthorized!", type: "error" });
+            if (typeof cb === "function") cb(false);
+            return;
+        }
+        return handler(data, cb);
+    };
+
     socket.on("ping", () => socket.emit("pong"));
 
     // --- GLOBAL ACTIONS (PRIORITY) ---
-    socket.on("all-profiles-start", (data) => {
+    socket.on("all-profiles-start", secure((data) => {
         logSolver("📡 Received: GLOBAL START command", "#3b82f6");
         const count = profileStates.size;
         const retrySettings = data?.retrySettings || data || {}; 
@@ -1527,7 +1546,7 @@ io.on("connection", (socket) => {
             logProfile(pState, "Global start signal received.", "#3b82f6");
             sendOtp(pState, retrySettings, null, false);
         });
-    });
+    }));
 
     socket.on("all-profiles-reserve-otp", secure((data) => {
         const retrySettings = data?.retrySettings || {};
@@ -1545,7 +1564,7 @@ io.on("connection", (socket) => {
         }
     }));
 
-    socket.on("all-profiles-stop", () => {
+    socket.on("all-profiles-stop", secure(() => {
         logSolver("📡 Received: GLOBAL STOP command", "#3b82f6");
         const count = profileStates.size;
         logSolver(`⏹ GLOBAL STOP: Halting all ${count} tasks...`, "#ef4444");
@@ -1558,9 +1577,9 @@ io.on("connection", (socket) => {
             TaskManager.stopTask(`GetOtp-${profileId}`);
             logProfile(pState, "Global Stop signal received.", "#64748b");
         });
-    });
+    }));
 
-    socket.on("all-profiles-reset", () => {
+    socket.on("all-profiles-reset", secure(() => {
         logSolver("📡 Received: GLOBAL RESET command", "#3b82f6");
         const count = profileStates.size;
         logSolver(`🔄 GLOBAL RESET: Wiping states/logs for all ${count} profiles...`, "#f59e0b");
@@ -1582,16 +1601,7 @@ io.on("connection", (socket) => {
             io.emit("profile-log-clear", profileId);
             logProfile(pState, "Profile global reset complete.", "#06b6d4");
         });
-    });
-
-    const secure = (handler) => (data, cb) => {
-        if (!socket.authenticated) {
-            socket.emit("status", { msg: "Unauthorized!", type: "error" });
-            if (typeof cb === "function") cb(false);
-            return;
-        }
-        return handler(data, cb);
-    };
+    }));
 
     socket.on("stop-all", secure(() => {
         TaskManager.stopAll();
@@ -1627,13 +1637,16 @@ io.on("connection", (socket) => {
     });
 
     socket.on("panel-session-login", (data, cb) => {
-        if (data?.token && data.token === currentSessionToken && Date.now() < sessionExpiry) {
+        const isValid = data?.token 
+            && data.token === panelConfig.sessionToken 
+            && Date.now() < (panelConfig.sessionExpiry || 0);
+
+        if (isValid) {
             socket.authenticated = true;
             if (typeof cb === "function") cb(true);
 
-            // Send profiles for the resumed session
+            // Send profiles and config for the resumed session
             socket.emit("all-profiles", Array.from(profileStates.values()));
-
             socket.emit("initial-config", {
                 mobile: panelConfig.saved_mobile || "",
                 email: panelConfig.saved_email || "",
@@ -1713,11 +1726,7 @@ io.on("connection", (socket) => {
         }
     }));
 
-    socket.on("hard-reset", (data) => {
-        if (!socket.authenticated) {
-            logSolver("❌ Unauthorized: Please login first.", "#ef4444");
-            return;
-        }
+    socket.on("hard-reset", secure((data) => {
         TaskManager.stopAll();
         workerNetworkClients.clear();
         preSolvedTokens = [];
@@ -1728,7 +1737,6 @@ io.on("connection", (socket) => {
         logSolver("🚀 Server Restarting via PM2...", "#10b981");
 
         try {
-            // Delay slightly to allow socket messages to leave the buffer
             setTimeout(() => {
                 try {
                     execSync("pm2 restart all", { stdio: "ignore" });
@@ -1739,13 +1747,9 @@ io.on("connection", (socket) => {
         } catch (error) {
             logSolver("❌ PM2 Restart failed. Check your process manager.", "#ef4444");
         }
-    });
+    }));
 
-    socket.on("git-update", (data) => {
-        if (!socket.authenticated) {
-            logSolver("❌ Unauthorized: Please login first.", "#ef4444");
-            return;
-        }
+    socket.on("git-update", secure((data) => {
         const msg = "🚀 Initiating System Update (git pull)...";
         logSolver(msg, "#3b82f6");
         
@@ -1790,7 +1794,7 @@ io.on("connection", (socket) => {
         } catch (e) {
             logSolver(`❌ Update execution failed: ${e.message}`, "#ef4444");
         }
-    });
+    }));
 
     socket.on("profile-add", secure((pData) => {
         const pState = createProfileState(pData);

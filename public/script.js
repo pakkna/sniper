@@ -23,13 +23,40 @@ function checkLogin() {
 function initUI() {
     // Login
     const loginBtn = $("login-btn");
-    if (loginBtn) {
-        loginBtn.onclick = () => {
-            const user = $("panel-user")?.value;
-            const pass = $("panel-pass")?.value;
-            socket.emit("panel-login", { user, pass });
-        };
-    }
+    const userInp = $("panel-user");
+    const passInp = $("panel-pass");
+
+    const doLogin = () => {
+        const user = userInp?.value;
+        const pass = passInp?.value;
+        if (!user || !pass) return alert("Please enter both username and password.");
+        
+        if (!socket.connected) {
+            return alert("❌ System is still connecting to server... Please wait a moment.");
+        }
+
+        loginBtn.disabled = true;
+        loginBtn.innerText = "SIGNING IN...";
+        socket.emit("panel-login", { user, pass });
+
+        // Safety timeout: re-enable button if no response from server
+        setTimeout(() => {
+            if (loginBtn.disabled && $("login-overlay").style.display !== "none") {
+                loginBtn.disabled = false;
+                loginBtn.innerText = "SIGN IN";
+            }
+        }, 10000);
+    };
+
+    if (loginBtn) loginBtn.onclick = doLogin;
+    
+    [userInp, passInp].forEach(el => {
+        if (el) {
+            el.addEventListener("keypress", (e) => {
+                if (e.key === "Enter") doLogin();
+            });
+        }
+    });
 
     // Add Profile
     const addProfileBtn = $("btn-add-profile");
@@ -461,6 +488,11 @@ socket.on("connect", () => {
 
 socket.on("login-error", (msg) => {
     const err = $("login-error");
+    const loginBtn = $("login-btn");
+    if (loginBtn) {
+        loginBtn.disabled = false;
+        loginBtn.innerText = "SIGN IN";
+    }
     if (err) {
         err.innerText = msg;
         err.style.display = "block";
@@ -589,6 +621,36 @@ socket.on("profile-log-data", (data) => {
             body.innerText = data.content || "No logs available.";
             body.scrollTop = body.scrollHeight;
         }
+    }
+});
+
+socket.on("status", (data) => {
+    if (data.msg === "Unauthorized!") {
+        sessionStorage.removeItem("panel_token");
+        sessionStorage.removeItem("panel_logged");
+        const overlay = $("login-overlay");
+        if (overlay) overlay.style.display = "flex";
+        alert("⚠️ Session expired or unauthorized. Please login again.");
+    }
+});
+
+socket.on("connect", () => {
+    const console = $("system-logs");
+    if (console) {
+        const div = document.createElement("div");
+        div.style.color = "var(--accent-green)";
+        div.innerText = `[${new Date().toLocaleTimeString()}] ✅ Connected to server.`;
+        console.appendChild(div);
+    }
+});
+
+socket.on("disconnect", () => {
+    const console = $("system-logs");
+    if (console) {
+        const div = document.createElement("div");
+        div.style.color = "var(--accent-red)";
+        div.innerText = `[${new Date().toLocaleTimeString()}] ❌ Connection lost!`;
+        console.appendChild(div);
     }
 });
 
