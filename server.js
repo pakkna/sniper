@@ -957,17 +957,6 @@ async function sendOtp(pState, retrySettings, oldOtpBoxValue = null, isManual = 
             }
 
             if (response.statusCode !== 200) {
-                if (!retrySettings?.enabled) {
-                    TaskManager.removeController(taskName, controller);
-                    logProfile(pState, `Send OTP Status [${response.statusCode}]`, "#ef4444", data);
-                    return;
-                }
-                
-                let waitMs = (retrySettings.seconds || 5) * 1000;
-                if (response.statusCode === 403 || response.statusCode === 503) waitMs = 2500 + Math.floor(Math.random() * 501);
-                else if (response.statusCode === 429) waitMs = 20000;
-                else if ([500, 501, 502, 504].includes(response.statusCode)) waitMs = 1500 + Math.floor(Math.random() * 500);
-
                 if (response.statusCode === 429) {
                     const msg = data?.message || "";
                     let totalSec = 0;
@@ -978,11 +967,11 @@ async function sendOtp(pState, retrySettings, oldOtpBoxValue = null, isManual = 
 
                     if (totalSec > 0) {
                         const waitMs = totalSec * 1000;
-                        logProfile(pState, `SendOTP 429: Cooldown for ${totalSec}s.`, "#eab308", data);
+                        logProfile(pState, `OTP Limit Reached! Cooldown for ${totalSec}s.`, "#eab308", data);
                         TaskManager.stopTask(taskName);
                         pState.steps.signin = 'idle';
                         pState.otpWaitUntil = Date.now() + waitMs;
-                        io.emit("profile-status", { profileId: pState.id, otpWaitUntil: pState.otpWaitUntil, msg: `OTP Cooldown: ${totalSec}s`, type: 'warning' });
+                        io.emit("profile-status", { profileId: pState.id, otpWaitUntil: pState.otpWaitUntil, msg: `OTP Limit Reached! Cooldown: ${totalSec}s`, type: 'error' });
                         
                         TaskManager.setTimeout(taskName, () => {
                             if (pState.otpWaitUntil) { // Proceed if not reset
@@ -995,11 +984,21 @@ async function sendOtp(pState, retrySettings, oldOtpBoxValue = null, isManual = 
                         return;
                     }
 
-                    logProfile(pState, `SendOTP 429: ${msg || "OTP limit reached."}`, "#ef4444", data);
+                    logProfile(pState, `OTP Limit Reached!`, "#ef4444", data);
                     TaskManager.stopTask(taskName);
                     pState.steps.signin = 'idle';
                     return;
                 }
+
+                if (!retrySettings?.enabled) {
+                    TaskManager.removeController(taskName, controller);
+                    logProfile(pState, `Send OTP Status [${response.statusCode}]`, "#ef4444", data);
+                    return;
+                }
+                
+                let waitMs = (retrySettings.seconds || 5) * 1000;
+                if (response.statusCode === 403 || response.statusCode === 503) waitMs = 2500 + Math.floor(Math.random() * 501);
+                else if ([500, 501, 502, 504].includes(response.statusCode)) waitMs = 1500 + Math.floor(Math.random() * 500);
 
                 const isTokenFresh = (Date.now() - tokenTime) <= 40000;
                 const canReuse = isTokenFresh && (response.statusCode === 403 || reqDuration < 3000);
@@ -1089,7 +1088,7 @@ async function verifyOtpAggressive(pState, otp, retrySettings, isAutoRetry = fal
         // Auto-Trigger Reservation if in window
         const bdNow = new Date(new Date().getTime() + 6 * 60 * 60 * 1000);
         const totalMins = bdNow.getUTCHours() * 60 + bdNow.getUTCMinutes();
-        const isWithinWindow = totalMins >= (17 * 60) && totalMins <= (20 * 60 + 30);
+        const isWithinWindow = totalMins >= (17 * 60) && totalMins <= (23 * 60);
 
         if (isWithinWindow) {
             if (!pState.flags.isReserveStarted && retrySettings?.enabled) {
@@ -1097,7 +1096,7 @@ async function verifyOtpAggressive(pState, otp, retrySettings, isAutoRetry = fal
                 reserveSlotAggressive(pState, retrySettings);
             }
         } else {
-            logProfile(pState, "Reserve Time (5:00 PM-8:30 PM)", "#ef4444");
+            logProfile(pState, "Reserve Time (5:00 PM-11:00 PM)", "#ef4444");
         }
     };
 
