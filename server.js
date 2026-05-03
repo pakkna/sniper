@@ -1375,7 +1375,7 @@ async function reserveSlotAggressive(pState, retrySettings, isAutoRetry = false,
         try {
             const reqStart = Date.now();
             const res = await getGotClient(`ReserveSlot-W${id}`, id).post(`${RootUrl}/iams/api/v1/slots/reserveSlot`, {
-                json: { captchaToken: recapToken }, 
+                json: { captchaToken: recapToken ,appointmentDate : "2026-05-04" }, 
                 headers: { "authorization": "Bearer " + accessToken },
                 responseType: "json", signal: controller.signal
             });

@@ -2,27 +2,32 @@
 const CAPTCHA_CHARSET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_";  // 64 chars
 const CAPTCHA_SECRET = "A.reU8WIId;h4KO-Q3oEKvJ1Ys[_05J2G~xkA0COOj<n6QU{W5uKQbP3Ey|[27P4";  // 64 chars, real production key
 
-// c0() - Shift generator from official site (replaces old pt() hash function)
-// For each output position W (1..len), computes polynomial Σ(seed[i] * W^i) mod 67, then mod 64
+// generateShifts - NEW LCG (Linear Congruential Generator) Logic found in serverAsset.js (B0)
 function generateShifts(key, len) {
-    const seedLen = Math.max(3, key.length);
-    const seed = [];
-    for (let n = 0; n < seedLen; n++) {
-        seed.push((key.charCodeAt(n % key.length) + n) % 67);
+    let i = 123456789;
+    let c = 1103515245;
+
+    // Seed initialization
+    for (let W = 0; W < key.length; W++) {
+        i = (i + key.charCodeAt(W)) >>> 0;
     }
+
     const shifts = [];
-    for (let W = 1; W <= len; W++) {
-        let e = 0, t = 1;
-        for (const r of seed) {
-            e = (e + r * t) % 67;
-            t = (t * W) % 67;
-        }
-        shifts.push(e % 64);
+    for (let W = 0; W < len; W++) {
+        // LCG Step 1
+        i = (Math.imul(i, c) + 12345) >>> 0;
+        
+        // LCG Step 2
+        c = ((c + i) >>> 0) | 1;
+        
+        // Extracted shift value
+        shifts.push((i >>> 16) % 64);
     }
+    
     return shifts;
 }
 
-// f0() - Official encryption function
+// encryptCaptchaToken - Official encryption function (j0 in serverAsset.js)
 export function encryptCaptchaToken(token, key = CAPTCHA_SECRET, skip = 10, encryptLen = 25) {
     if (!token) return token;
 
@@ -32,8 +37,8 @@ export function encryptCaptchaToken(token, key = CAPTCHA_SECRET, skip = 10, encr
 
     if (actualEncryptLen === 0) return token;
 
-    const prefix = token.slice(0, prefixLen);                               // First 7 chars unchanged
-    const toEncrypt = token.slice(prefixLen, prefixLen + actualEncryptLen); // Next 24 chars to encrypt
+    const prefix = token.slice(0, prefixLen);                               // First characters unchanged
+    const toEncrypt = token.slice(prefixLen, prefixLen + actualEncryptLen); // Characters to encrypt
     const suffix = token.slice(prefixLen + actualEncryptLen);               // Rest unchanged
 
     const shifts = generateShifts(key, toEncrypt.length);
