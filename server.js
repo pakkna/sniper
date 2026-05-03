@@ -996,8 +996,7 @@ async function sendOtp(pState, retrySettings, oldOtpBoxValue = null, isManual = 
     if (isManual && isRunning) {
         numWorkers = 1;
     } else {
-        let base = parseInt(retrySettings?.mode, 10) || 1;
-        numWorkers = (base > 5) ? 5 : base;
+        numWorkers = parseInt(retrySettings?.mode, 10) || 1;
     }
     activeCount = numWorkers;
 
@@ -1011,12 +1010,12 @@ async function sendOtp(pState, retrySettings, oldOtpBoxValue = null, isManual = 
         const solveRes = await solveAggressive(pState);
         if (!solveRes) { logProfile(pState, "Captcha solve failed for batch", "#ef4444"); return; }
         for (let i = 1; i <= numWorkers; i++) {
-            const delay = (i === 1) ? 0 : ((i - 1) * (Math.floor(Math.random() * 201) + 150));
+            const delay = (i === 1) ? 0 : (i - 1) * 150;
             trySend(i, delay, solveRes.token, solveRes.time);
         }
     } else {
         for (let i = 1; i <= numWorkers; i++) {
-            const delay = (i === 1) ? 0 : ((i - 1) * (Math.floor(Math.random() * 201) + 150));
+            const delay = (i === 1) ? 0 : (i - 1) * 150;
             const batchToken = batchTokens ? (batchTokens[i - 1]?.token || null) : null;
             const batchTokenTime = batchTokens ? (batchTokens[i - 1]?.time || null) : null;
             trySend(i, delay, batchToken, batchTokenTime);
@@ -1138,15 +1137,16 @@ async function verifyOtpAggressive(pState, otp, retrySettings, isAutoRetry = fal
     };
 
     const isRunning = TaskManager.tasks[taskName]?.controllers.size > 0;
+    const numModeWorkers = parseInt(retrySettings?.mode, 10) || 1;
     if (isManual && isRunning) {
         activeCount = 1;
         pState.workerCounts.verifyOtp++;
         worker(pState.workerCounts.verifyOtp, 0);
     } else {
-        const numModeWorkers = parseInt(retrySettings?.mode, 10) || 1;
         activeCount = numModeWorkers;
+        const isBatch = retrySettings?.logic === "batch" || retrySettings?.logic === "single-batch";
         for (let i = 1; i <= numModeWorkers; i++) {
-            let delay = (i === 1) ? 0 : (i - 1) * 500;
+            let delay = (i === 1) ? 0 : (i - 1) * (isBatch ? 150 : 500);
             worker(i, delay);
         }
     }
@@ -1316,7 +1316,7 @@ async function checkSlot(pState, retrySettings) {
     trySlot();
 }
 
-async function reserveSlotAggressive(pState, retrySettings, isAutoRetry = false, isManual = false) {
+async function reserveSlotAggressive(pState, retrySettings, isAutoRetry = false, isManual = false, batchTokens = null) {
     pState.steps.reserve = 'active';
     const taskName = `ReserveSlot-${pState.id}`;
     const accessToken = pState.authStorage.state.token;
@@ -1437,17 +1437,25 @@ async function reserveSlotAggressive(pState, retrySettings, isAutoRetry = false,
     const isSingleBatch = retrySettings?.logic === "single-batch";
     const hasReusable = batchTokens && batchTokens.some(t => t.token);
 
-    if (isSingleBatch && !hasReusable && (!isManual || !isRunning)) {
-        logProfile(pState, "[Single-Batch] Solving one captcha for all workers...", "#3b82f6");
+    if (isSingleBatch && !hasReusable) {
+        logProfile(pState, "[Single-Batch] Solving fresh captcha for batch...", "#3b82f6");
         let solveRes = await solveAggressive(pState);
-        if (!solveRes) { logProfile(pState, "Captcha solve failed for batch", "#ef4444"); return; }
+        if (!solveRes) { 
+            logProfile(pState, "Captcha solve failed for batch. Retrying in 2s...", "#ef4444");
+            TaskManager.setTimeout(taskName, () => reserveSlotAggressive(pState, retrySettings, true), 2000);
+            return;
+        }
+        
         const recapToken = encryptCaptchaToken(solveRes.token);
         const tokenTime = solveRes.time;
+        logProfile(pState, `[Single-Batch] Firing mode-wise stack (${numWorkersToStart}X) with same token...`, "#10b981");
+        
         for (let i = 0; i < numWorkersToStart; i++) {
-            const delay = i * 250;
+            const delay = i * 100; // Tighter delay for "stacking" effect
             worker(i + 1, delay, recapToken, tokenTime);
         }
     } else {
+        // Mode-wise fire (Standard Batch or Manual)
         for (let i = 0; i < numWorkersToStart; i++) {
             const batchToken = batchTokens ? (batchTokens[i]?.token || null) : null;
             const batchTokenTime = batchTokens ? (batchTokens[i]?.time || null) : null;
