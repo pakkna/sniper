@@ -111,7 +111,7 @@
         #bd-clock { font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: 600; color: var(--accent-amber); }
 
         /* --- Main Content --- */
-        .main-content { padding: 24px; max-width: 1600px; margin: 0 auto; }
+        .main-content { padding: 24px; max-width: 98%; margin: 0 auto; }
 
         .section-header {
             display: flex;
@@ -378,6 +378,7 @@
                 <button class="btn btn-warning" id="btn-reset-all" style="padding: 6px 12px; font-size: 11px;">🔄 RESET ALL</button>
                 <button class="btn btn-danger" id="btn-stop-all-global" style="padding: 6px 12px; font-size: 11px;">⏹ STOP ALL</button>
                 <button class="btn btn-primary" id="btn-add-profile" style="padding: 6px 12px; font-size: 11px;">+ Add Profile</button>
+                <button class="btn btn-danger" id="btn-delete-all" style="padding: 6px 12px; font-size: 11px;">🗑 DELETE ALL</button>
             </div>
         </div>
 
@@ -385,14 +386,16 @@
             <table id="task-table">
                 <thead>
                     <tr>
-                        <th width="10%">Task Name</th>
-                        <th width="14%">Identity</th>
+                        <th width="3%">#SN</th>
+                        <th width="8%">Task Name</th>
+                        <th width="12%">Identity</th>
                         <th width="10%">OTP</th>
                         <th width="8%">Session</th>
-                        <th width="18%">Step Progress</th>
-                        <th width="15%">Status Message</th>
-                        <th width="6%">Payment</th>
-                        <th width="19%">Actions</th>
+                        <th width="16%">Step Progress</th>
+                        <th width="13%">Status Message</th>
+                        <th width="8%">Reservation</th>
+                        <th width="8%">Payment</th>
+                        <th width="14%">Actions</th>
                     </tr>
                 </thead>
                 <tbody id="task-list">

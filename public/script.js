@@ -64,6 +64,15 @@ function initUI() {
         addProfileBtn.onclick = () => openModal("modal-profile");
     }
 
+    const deleteAllBtn = $("btn-delete-all");
+    if (deleteAllBtn) {
+        deleteAllBtn.onclick = () => {
+            if (confirm("Are you sure you want to delete ALL profiles? This action cannot be undone.")) {
+                socket.emit("delete-all-profiles");
+            }
+        };
+    }
+
     const saveProfileBtn = $("btn-save-profile");
     if (saveProfileBtn) {
         saveProfileBtn.onclick = () => {
@@ -323,7 +332,7 @@ function renderProfiles(data) {
     if (!list) return;
     list.innerHTML = "";
     
-    profiles.forEach(p => {
+    profiles.forEach((p, index) => {
         const row = document.createElement("tr");
         row.id = `row-${p.id}`;
         
@@ -333,6 +342,7 @@ function renderProfiles(data) {
         const getIcon = (s) => s === 'done' ? '✓' : (s === 'active' ? '➜' : (s === 'error' ? '✖' : ''));
 
         row.innerHTML = `
+            <td style="font-weight:700; color:var(--accent-amber); font-family: 'JetBrains Mono', monospace; font-size:11px;">${index + 1}</td>
             <td>
                 <div style="display:flex; align-items:center; gap:6px;">
                     <button class="btn btn-danger" style="padding:2px 4px; font-size:10px; border-radius: 4px;" onclick="handleRemove('${p.id}')" title="Delete Profile">🗑️</button>
@@ -370,7 +380,12 @@ function renderProfiles(data) {
                 <div class="status-msg" id="status-${p.id}" title="${(p.status?.msg || '').replace(/"/g, '&quot;')}">${p.status?.msg || 'Ready'}</div>
                 <div style="font-size:10px; color:var(--text-secondary); margin-top:4px;" id="time-${p.id}">${p.status?.time || '-'}</div>
             </td>
-            <td id="result-${p.id}">-</td>
+            <td id="resv-${p.id}">
+                ${p.reservedAt ? `<div style="font-size:10px; font-weight:700; color:var(--accent-green);">Reserved<br>[${formatCountdown(p.reservedAt, 5)}]</div>` : '-'}
+            </td>
+            <td id="payment-${p.id}">
+                ${p.paymentUrl ? `<div style="display:flex; align-items:center; gap:4px;"><a href="${p.paymentUrl}" target="_blank" class="btn btn-success" style="font-size:9px; padding:4px;">PayNow Link</a> <button class="btn btn-ghost" style="padding:2px 4px; font-size:10px;" onclick="navigator.clipboard.writeText('${p.paymentUrl}'); alert('Link copied!');" title="Copy Link">📋</button></div>` : '-'}
+            </td>
             <td>
                 <div style="display:flex; flex-wrap:wrap; gap:4px;">
                     <button class="btn btn-primary" style="padding:4px 6px; font-size:9px;" onclick="handleAction('${p.id}', 'send-otp')">SendOtp</button>
@@ -408,10 +423,10 @@ function handleStop(id) {
     socket.emit("profile-stop", id);
 }
 
-function formatCountdown(verifiedAt) {
-    if (!verifiedAt) return "-";
+function formatCountdown(timestamp, maxMinutes = 15) {
+    if (!timestamp) return "-";
     const now = Date.now();
-    const expiry = verifiedAt + (15 * 60 * 1000); // 15 Minutes
+    const expiry = timestamp + (maxMinutes * 60 * 1000);
     const diff = expiry - now;
     if (diff <= 0) return "EXPIRED";
     const mins = Math.floor(diff / 60000);
@@ -424,9 +439,15 @@ setInterval(() => {
     profiles.forEach(p => {
         const el = $(`session-${p.id}`);
         if (el && p.verifiedAt) {
-            const timeStr = formatCountdown(p.verifiedAt);
+            const timeStr = formatCountdown(p.verifiedAt, 15);
             el.innerText = timeStr;
             el.style.color = timeStr === "EXPIRED" ? "var(--accent-red)" : "var(--accent-blue)";
+        }
+
+        const resvEl = $(`resv-${p.id}`);
+        if (resvEl && p.reservedAt) {
+            const timeStr = formatCountdown(p.reservedAt, 5);
+            resvEl.innerHTML = `<div style="font-size:10px; font-weight:700; color:var(--accent-green);">Reserved<br>[${timeStr}]</div>`;
         }
 
         const otpInput = $(`otp-${p.id}`);
@@ -438,14 +459,20 @@ setInterval(() => {
                     const secs = Math.floor((diff % 60000) / 1000);
                     otpInput.value = `${mins}:${secs.toString().padStart(2, '0')}`;
                     otpInput.disabled = true;
+                    otpInput.style.color = "var(--accent-red)";
+                    otpInput.style.fontWeight = "700";
                 } else {
                     otpInput.value = "";
                     otpInput.disabled = false;
+                    otpInput.style.color = "";
+                    otpInput.style.fontWeight = "";
                     p.otpWaitUntil = null;
                 }
             } else if (otpInput.disabled && otpInput.value.includes(':')) {
                 otpInput.value = "";
                 otpInput.disabled = false;
+                otpInput.style.color = "";
+                otpInput.style.fontWeight = "";
             }
         }
     });
@@ -542,6 +569,18 @@ socket.on("profile-status", (data) => {
         profiles[pIdx].verifiedAt = verifiedAt;
         if (steps) profiles[pIdx].steps = steps;
         if (data.otpWaitUntil !== undefined) profiles[pIdx].otpWaitUntil = data.otpWaitUntil;
+        if (data.reservedAt !== undefined) profiles[pIdx].reservedAt = data.reservedAt;
+        if (data.paymentUrl !== undefined) {
+            profiles[pIdx].paymentUrl = data.paymentUrl;
+            const payEl = $(`payment-${profileId}`);
+            if (payEl) payEl.innerHTML = data.paymentUrl ? `<div style="display:flex; align-items:center; gap:4px;"><a href="${data.paymentUrl}" target="_blank" class="btn btn-success" style="font-size:9px; padding:4px;">PayNow Link</a> <button class="btn btn-ghost" style="padding:2px 4px; font-size:10px;" onclick="navigator.clipboard.writeText('${data.paymentUrl}'); alert('Link copied!');" title="Copy Link">📋</button></div>` : '-';
+        }
+        
+        const otpInput = $(`otp-${profileId}`);
+        if (otpInput) {
+            if (data.foundOtp) otpInput.value = data.foundOtp;
+            if (data.clearOtp) otpInput.value = "";
+        }
     }
     
     if (statusEl) {
@@ -553,15 +592,10 @@ socket.on("profile-status", (data) => {
     
     if (sessionEl) {
         if (verifiedAt) {
-            sessionEl.innerText = formatCountdown(verifiedAt);
+            sessionEl.innerText = formatCountdown(verifiedAt, 15);
         } else {
             sessionEl.innerText = "-";
         }
-    }
-
-    const resultEl = $(`result-${profileId}`);
-    if (resultEl && !verifiedAt) {
-        resultEl.innerText = "-";
     }
 
     if (stepsEl && steps) {
@@ -653,6 +687,22 @@ socket.on("status", (data) => {
         const overlay = $("login-overlay");
         if (overlay) overlay.style.display = "flex";
         alert("⚠️ Session expired or unauthorized. Please login again.");
+    }
+});
+
+const updateSettingsToBackend = () => {
+    if (socket.connected) {
+        socket.emit("global-settings-update", getGlobalSettings());
+    }
+};
+
+["global-auto-toggle", "global-retry-sec", "global-retry-mode", "global-proxy-select", "global-retry-logic", "global-hit-time"].forEach(id => {
+    const el = $(id);
+    if (el) {
+        el.addEventListener("change", updateSettingsToBackend);
+        if (id === "global-auto-toggle") {
+            el.addEventListener("click", () => setTimeout(updateSettingsToBackend, 50));
+        }
     }
 });
 

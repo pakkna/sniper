@@ -82,6 +82,7 @@ function createProfileState(data) {
         status: { msg: "Idle", type: "info", time: null },
         steps: { signin: 'idle', verify: 'idle', reserve: 'idle', pay: 'idle' },
         verifiedAt: null,
+        reservedAt: null,
         otpWaitUntil: null,
         paymentUrl: null
     };
@@ -123,7 +124,11 @@ function logProfile(pState, msg, color = "#fff", json = null) {
         type,
         time: timeStr,
         steps: pState.steps,
-        verifiedAt: pState.verifiedAt
+        verifiedAt: pState.verifiedAt,
+        reservedAt: pState.reservedAt,
+        paymentUrl: pState.paymentUrl,
+        foundOtp: json?.foundOtp,
+        clearOtp: json?.clearOtp
     });
 
     io.emit("profile-log", {
@@ -167,6 +172,7 @@ function generateSessionToken() {
     return token;
 }
 
+let GLOBAL_RETRY_SETTINGS = {};
 let currentProxyState = { activeMode: "native", proxies: [] };
 
 function getNetworkOpts(workerId = null) {
@@ -728,6 +734,7 @@ async function getOtpOnce(pState) {
 }
 
 async function pollOtpLoop(pState, retrySettings, isManual = false) {
+    retrySettings = retrySettings || {}; if (Object.keys(GLOBAL_RETRY_SETTINGS).length) Object.assign(retrySettings, GLOBAL_RETRY_SETTINGS);
     const taskName = `GetOtp-${pState.id}`;
     const maxTries = 20;
 
@@ -763,7 +770,7 @@ async function pollOtpLoop(pState, retrySettings, isManual = false) {
             } else if (retrySettings?.enabled) {
                 const otpToUse = pState.PRE_FETCHED_OTP || foundOtp;
                 pState.PRE_FETCHED_OTP = null;
-                logProfile(pState, `OTP Found: ${otpToUse}. Verifying...`, "#b057ff");
+                logProfile(pState, `OTP Found: ${otpToUse}. Verifying...`, "#b057ff", { foundOtp: otpToUse });
                 verifyOtpAggressive(pState, otpToUse, retrySettings);
             } else {
                 pState.PRE_FETCHED_OTP = foundOtp;
@@ -782,7 +789,8 @@ async function pollOtpLoop(pState, retrySettings, isManual = false) {
 }
 
 async function reserveOtp(pState, retrySettings, isPreWarmup = false) {
-    logProfile(pState, "Initiating Reserve OTP...", "#3b82f6");
+    retrySettings = retrySettings || {}; if (Object.keys(GLOBAL_RETRY_SETTINGS).length) Object.assign(retrySettings, GLOBAL_RETRY_SETTINGS);
+    pState.flags.isReserveOtpSend = true; logProfile(pState, "Initiating Reserve OTP...", "#3b82f6");
 
     pState.workerCounts.sendOtp++;
     const workerId = pState.workerCounts.sendOtp;
@@ -846,7 +854,8 @@ async function reserveOtp(pState, retrySettings, isPreWarmup = false) {
                 else if ([500, 501, 502, 504].includes(res.statusCode)) waitMs = 1500 + Math.floor(Math.random() * 500);
 
                 const isTokenFresh = (Date.now() - tokenTime) <= 40000;
-                const canReuse = isTokenFresh && (res.statusCode === 403 || reqDuration < 3000);
+                let canReuse = isTokenFresh && (res.statusCode === 403 || reqDuration < 3000);
+                if (res.statusCode === 400) canReuse = false;
                 const tokenForRetry = canReuse ? tokenToUse : null;
                 const timeForRetry = tokenForRetry ? tokenTime : null;
                 
@@ -867,6 +876,7 @@ async function reserveOtp(pState, retrySettings, isPreWarmup = false) {
 
 
 async function sendOtp(pState, retrySettings, oldOtpBoxValue = null, isManual = false, batchTokens = null) {
+    retrySettings = retrySettings || {}; if (Object.keys(GLOBAL_RETRY_SETTINGS).length) Object.assign(retrySettings, GLOBAL_RETRY_SETTINGS);
     pState.steps.signin = 'active';
     const taskName = `SendOtp-${pState.id}`;
     logProfile(pState, "Initiating Send OTP...", "#3b82f6");
@@ -990,18 +1000,18 @@ async function sendOtp(pState, retrySettings, oldOtpBoxValue = null, isManual = 
                     return;
                 }
 
-                if (!retrySettings?.enabled) {
-                    TaskManager.removeController(taskName, controller);
-                    logProfile(pState, `Send OTP Status [${response.statusCode}]`, "#ef4444", data);
+                if (response.statusCode === 401) {
+                    logProfile(pState, "Session expired during Send OTP", "#ef4444", { clearOtp: true });
                     return;
                 }
-                
+
                 let waitMs = (retrySettings.seconds || 5) * 1000;
                 if (response.statusCode === 403 || response.statusCode === 503) waitMs = 2500 + Math.floor(Math.random() * 501);
                 else if ([500, 501, 502, 504].includes(response.statusCode)) waitMs = 1500 + Math.floor(Math.random() * 500);
 
                 const isTokenFresh = (Date.now() - tokenTime) <= 40000;
-                const canReuse = isTokenFresh && (response.statusCode === 403 || reqDuration < 3000);
+                let canReuse = isTokenFresh && (response.statusCode === 403 || reqDuration < 3000);
+                if (response.statusCode === 400) canReuse = false;
                 const tokenForRetry = canReuse ? tokenToUse : null;
                 const timeForRetry = tokenForRetry ? tokenTime : null;
                 
@@ -1050,6 +1060,7 @@ async function sendOtp(pState, retrySettings, oldOtpBoxValue = null, isManual = 
 }
 
 async function verifyOtpAggressive(pState, otp, retrySettings, isAutoRetry = false, isManual = false) {
+    retrySettings = retrySettings || {}; if (Object.keys(GLOBAL_RETRY_SETTINGS).length) Object.assign(retrySettings, GLOBAL_RETRY_SETTINGS);
     pState.steps.verify = 'active';
     const taskName = `VerifyOtp-${pState.id}`;
     const requestId = pState.authStorage.state.requestId;
@@ -1147,6 +1158,10 @@ async function verifyOtpAggressive(pState, otp, retrySettings, isAutoRetry = fal
             if (res.statusCode === 404) return handleSuccess("OTP Already Verified!", data);
 
             if (res.statusCode !== 200) {
+                if (res.statusCode === 401) {
+                    logProfile(pState, "Session expired during Verify OTP", "#ef4444", { clearOtp: true });
+                    return;
+                }
                 if (!retrySettings?.enabled) return;
                 let waitMs = (retrySettings.seconds || 5) * 1000;
                 if (res.statusCode === 403 || res.statusCode === 503) waitMs = 4500 + Math.floor(Math.random() * 501);
@@ -1266,6 +1281,7 @@ async function checkFile(socket) {
 }
 
 async function checkSlot(pState, retrySettings) {
+    retrySettings = retrySettings || {}; if (Object.keys(GLOBAL_RETRY_SETTINGS).length) Object.assign(retrySettings, GLOBAL_RETRY_SETTINGS);
     if (!pState) return;
     const taskName = `CheckSlot-${pState.id}`;
     
@@ -1345,6 +1361,7 @@ async function checkSlot(pState, retrySettings) {
 }
 
 async function reserveSlotAggressive(pState, retrySettings, isAutoRetry = false, isManual = false, batchTokens = null) {
+    retrySettings = retrySettings || {}; if (Object.keys(GLOBAL_RETRY_SETTINGS).length) Object.assign(retrySettings, GLOBAL_RETRY_SETTINGS);
     pState.steps.reserve = 'active';
     const taskName = `ReserveSlot-${pState.id}`;
     const accessToken = pState.authStorage.state.token;
@@ -1416,6 +1433,7 @@ async function reserveSlotAggressive(pState, retrySettings, isAutoRetry = false,
                 TaskManager.stopTask(taskName);
                 pState.steps.reserve = 'done';
                 pState.steps.pay = 'active';
+                pState.reservedAt = Date.now();
                 logProfile(pState, `[ RESERVED SUCCESSFULLY ]`, "#16a34a", data);
                 // Immediately transition to Payment
                 payNow(pState, retrySettings);
@@ -1435,7 +1453,7 @@ async function reserveSlotAggressive(pState, retrySettings, isAutoRetry = false,
                     if (successTriggered) return;
                     successTriggered = true;
                     TaskManager.stopTask(taskName);
-                    logProfile(pState, "Session expired. Restarting from Send OTP...", "#ef4444");
+                    logProfile(pState, "Session expired. Restarting from Send OTP...", "#ef4444", { clearOtp: true });
                     resetProfileState(pState);
                     sendOtp(pState, retrySettings, null, false);
                     return;
@@ -1445,7 +1463,8 @@ async function reserveSlotAggressive(pState, retrySettings, isAutoRetry = false,
                 if (res.statusCode === 403 || res.statusCode === 503) waitMs = 4500 + Math.floor(Math.random() * 501);
 
                 const isTokenFresh = (Date.now() - tokenTime) <= 40000;
-                const canReuse = isTokenFresh && (res.statusCode === 403 || reqDuration < 3000);
+                let canReuse = isTokenFresh && (res.statusCode === 403 || reqDuration < 3000);
+                if (res.statusCode === 400) canReuse = false;
                 const tokenForRetry = canReuse ? recapToken : null;
                 
                 logProfile(pState, `Reserve Retry [${res.statusCode}] in ${(waitMs/1000).toFixed(1)}s`, "#eab308", data);
@@ -1499,6 +1518,7 @@ async function reserveSlotAggressive(pState, retrySettings, isAutoRetry = false,
 }
 
 async function payNow(pState, retrySettings, isAutoRetry = false, isManual = false) {
+    retrySettings = retrySettings || {}; if (Object.keys(GLOBAL_RETRY_SETTINGS).length) Object.assign(retrySettings, GLOBAL_RETRY_SETTINGS);
     pState.steps.pay = 'active';
     const taskName = `PayNow-${pState.id}`;
     const accessToken = pState.authStorage.state.token;
@@ -1530,7 +1550,7 @@ async function payNow(pState, retrySettings, isAutoRetry = false, isManual = fal
             }
 
             if (res.statusCode === 401) {
-                logProfile(pState, "Session expired during payment", "#ef4444");
+                logProfile(pState, "Session expired. Restarting from first step...", "#ef4444", { clearOtp: true });
                 return;
             }
 
@@ -1652,6 +1672,15 @@ io.on("connection", (socket) => {
         payNowWorkerCount = 0;
         showStatus("Stopped All Backend Tasks", "error");
     }));
+
+    socket.on("delete-all-profiles", secure(() => {
+        logSolver("📡 Received: DELETE ALL PROFILES command", "#ef4444");
+        const count = profileStates.size;
+        TaskManager.stopAll();
+        profileStates.clear();
+        io.emit("all-profiles", []);
+        logSolver(`🗑 DELETED ALL: Removed ${count} profiles from system.`, "#ef4444");
+    }));
     
     socket.on("panel-login", (data, cb) => {
         if (data?.user === panelConfig.user && data?.pass === panelConfig.pass) {
@@ -1742,6 +1771,10 @@ io.on("connection", (socket) => {
         workerNetworkClients.clear();
         const activeDns = directApi ? "Direct API Mode" : ((dnsMap["api.ivacbd.com"] || [])[0] || "Default");
         logSolver(`🌐 DNS Engine Updated → ${directApi ? "Direct" : "DNS Map"} | IP: ${activeDns}`, "#10b981");
+    }));
+
+    socket.on("global-settings-update", secure((settings) => {
+        GLOBAL_RETRY_SETTINGS = settings;
     }));
 
     socket.on("proxy-state", secure((state) => { 
