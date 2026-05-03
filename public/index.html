@@ -129,7 +129,7 @@
             box-shadow: 0 10px 30px rgba(0,0,0,0.3);
         }
 
-        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
         th { 
             background: rgba(255,255,255,0.02); 
             text-align: left; 
@@ -141,7 +141,7 @@
         td { padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: middle; }
         tr:hover { background: rgba(255,255,255,0.01); }
 
-        .status-msg { font-size: 12px; color: var(--text-secondary); line-height: 1.4; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .status-msg { font-size: 12px; color: var(--text-secondary); line-height: 1.4; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
         .otp-input-group { display: flex; gap: 4px; align-items: center; }
         .otp-input-group input { width: 70px; letter-spacing: 2px; font-weight: 700; text-align: center; }
 
@@ -387,12 +387,12 @@
                     <tr>
                         <th width="10%">Task Name</th>
                         <th width="14%">Identity</th>
-                        <th width="12%">OTP</th>
-                        <th width="10%">Session</th>
+                        <th width="10%">OTP</th>
+                        <th width="8%">Session</th>
                         <th width="18%">Step Progress</th>
                         <th width="15%">Status Message</th>
-                        <th width="8%">Payment</th>
-                        <th width="18%">Actions</th>
+                        <th width="6%">Payment</th>
+                        <th width="19%">Actions</th>
                     </tr>
                 </thead>
                 <tbody id="task-list">

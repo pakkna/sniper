@@ -367,7 +367,7 @@ function renderProfiles(data) {
                 </div>
             </td>
             <td>
-                <div class="status-msg" id="status-${p.id}">${p.status?.msg || 'Ready'}</div>
+                <div class="status-msg" id="status-${p.id}" title="${(p.status?.msg || '').replace(/"/g, '&quot;')}">${p.status?.msg || 'Ready'}</div>
                 <div style="font-size:10px; color:var(--text-secondary); margin-top:4px;" id="time-${p.id}">${p.status?.time || '-'}</div>
             </td>
             <td id="result-${p.id}">-</td>
@@ -427,6 +427,26 @@ setInterval(() => {
             const timeStr = formatCountdown(p.verifiedAt);
             el.innerText = timeStr;
             el.style.color = timeStr === "EXPIRED" ? "var(--accent-red)" : "var(--accent-blue)";
+        }
+
+        const otpInput = $(`otp-${p.id}`);
+        if (otpInput) {
+            if (p.otpWaitUntil) {
+                const diff = p.otpWaitUntil - Date.now();
+                if (diff > 0) {
+                    const mins = Math.floor(diff / 60000);
+                    const secs = Math.floor((diff % 60000) / 1000);
+                    otpInput.value = `${mins}:${secs.toString().padStart(2, '0')}`;
+                    otpInput.disabled = true;
+                } else {
+                    otpInput.value = "";
+                    otpInput.disabled = false;
+                    p.otpWaitUntil = null;
+                }
+            } else if (otpInput.disabled && otpInput.value.includes(':')) {
+                otpInput.value = "";
+                otpInput.disabled = false;
+            }
         }
     });
 }, 1000);
@@ -521,10 +541,12 @@ socket.on("profile-status", (data) => {
     if (pIdx !== -1) {
         profiles[pIdx].verifiedAt = verifiedAt;
         if (steps) profiles[pIdx].steps = steps;
+        if (data.otpWaitUntil !== undefined) profiles[pIdx].otpWaitUntil = data.otpWaitUntil;
     }
     
     if (statusEl) {
         statusEl.innerText = msg;
+        statusEl.title = msg;
         statusEl.style.color = type === "success" ? "var(--accent-green)" : (type === "error" ? "var(--accent-red)" : "var(--text-secondary)");
     }
     if (timeEl) timeEl.innerText = time || new Date().toLocaleTimeString();

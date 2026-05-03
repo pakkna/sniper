@@ -82,6 +82,7 @@ function createProfileState(data) {
         status: { msg: "Idle", type: "info", time: null },
         steps: { signin: 'idle', verify: 'idle', reserve: 'idle', pay: 'idle' },
         verifiedAt: null,
+        otpWaitUntil: null,
         paymentUrl: null
     };
 }
@@ -968,7 +969,33 @@ async function sendOtp(pState, retrySettings, oldOtpBoxValue = null, isManual = 
                 else if ([500, 501, 502, 504].includes(response.statusCode)) waitMs = 1500 + Math.floor(Math.random() * 500);
 
                 if (response.statusCode === 429) {
-                    logProfile(pState, `SendOTP 429: ${data?.message || "OTP limit reached."}.`, "#ef4444", data);
+                    const msg = data?.message || "";
+                    let totalSec = 0;
+                    const minMatch = msg.match(/(\d+)\s*min/i);
+                    const secMatch = msg.match(/(\d+)\s*sec/i);
+                    if (minMatch) totalSec += parseInt(minMatch[1]) * 60;
+                    if (secMatch) totalSec += parseInt(secMatch[1]);
+
+                    if (totalSec > 0) {
+                        const waitMs = totalSec * 1000;
+                        logProfile(pState, `SendOTP 429: Cooldown for ${totalSec}s.`, "#eab308", data);
+                        TaskManager.stopTask(taskName);
+                        pState.steps.signin = 'idle';
+                        pState.otpWaitUntil = Date.now() + waitMs;
+                        io.emit("profile-status", { profileId: pState.id, otpWaitUntil: pState.otpWaitUntil, msg: `OTP Cooldown: ${totalSec}s`, type: 'warning' });
+                        
+                        TaskManager.setTimeout(taskName, () => {
+                            if (pState.otpWaitUntil) { // Proceed if not reset
+                                pState.otpWaitUntil = null;
+                                io.emit("profile-status", { profileId: pState.id, otpWaitUntil: null });
+                                logProfile(pState, `Cooldown finished. Restarting Send OTP...`, "#3b82f6");
+                                sendOtp(pState, retrySettings, oldOtpBoxValue, false, null);
+                            }
+                        }, waitMs + 1000); // 1 sec delay after countdown
+                        return;
+                    }
+
+                    logProfile(pState, `SendOTP 429: ${msg || "OTP limit reached."}`, "#ef4444", data);
                     TaskManager.stopTask(taskName);
                     pState.steps.signin = 'idle';
                     return;
@@ -1289,7 +1316,9 @@ async function checkSlot(pState, retrySettings) {
             if (res.statusCode !== 200) {
                 if (res.statusCode === 401) {
                     TaskManager.stopTask(taskName);
-                    logProfile(pState, "Session expired during Check Slot", "#ef4444", data);
+                    logProfile(pState, "Session expired during Check Slot. Restarting...", "#ef4444", data);
+                    resetProfileState(pState);
+                    sendOtp(pState, retrySettings, null, false);
                     return;
                 }
                 if (retrySettings?.enabled) {
@@ -1404,7 +1433,12 @@ async function reserveSlotAggressive(pState, retrySettings, isAutoRetry = false,
 
             if (res.statusCode !== 200) {
                 if (res.statusCode === 401) {
-                    logProfile(pState, "Session expired during reservation", "#ef4444");
+                    if (successTriggered) return;
+                    successTriggered = true;
+                    TaskManager.stopTask(taskName);
+                    logProfile(pState, "Session expired. Restarting from Send OTP...", "#ef4444");
+                    resetProfileState(pState);
+                    sendOtp(pState, retrySettings, null, false);
                     return;
                 }
                 
