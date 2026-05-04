@@ -1,42 +1,34 @@
 // ==================== CAPTCHA TOKEN ENCRYPTION ====================
-const CAPTCHA_CHARSET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_";
-const CAPTCHA_SECRET = "2323k4j3202934)(*(*&*(&##KKLJLJKLJ)##LJ754";
+const CAPTCHA_CHARSET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_";  // 64 chars
+const CAPTCHA_SECRET = "A.reU8WIId;h4KO-Q3oEKvJ1Ys[_05J2G~xkA0COOj<n6QU{W5uKQbP3Ey|[27P4";  // 64 chars, real production key
 
-/**
- * Generates encryption shifts using the LCG (Linear Congruential Generator) pattern
- * matched from serverAsset.js (function q0)
- * @param {string} key - The secret key string
- * @param {number} len - Number of shifts to generate
- * @returns {number[]} Array of numeric shifts
- */
+// generateShifts - NEW LCG (Linear Congruential Generator) Logic found in serverAsset.js (B0)
 function generateShifts(key, len) {
-    let u = 123456789;
-    let s = 1103515245;
+    let i = 123456789;
+    let c = 1103515245;
 
-    // Seed initialization matching production q0
-    for (let f = 0; f < key.length; f++) {
-        u = (u + key.charCodeAt(f)) >>> 0;
+    // Seed initialization
+    for (let W = 0; W < key.length; W++) {
+        i = (i + key.charCodeAt(W)) >>> 0;
     }
 
     const shifts = [];
-    for (let f = 0; f < len; f++) {
-        // LCG update step
-        u = Math.imul(u, s) + 12345 >>> 0;
+    for (let W = 0; W < len; W++) {
+        // LCG Step 1
+        i = (Math.imul(i, c) + 12345) >>> 0;
         
-        // Parameter update (s)
-        s = ((s + u) >>> 0) | 1;
+        // LCG Step 2
+        c = ((c + i) >>> 0) | 1;
         
-        // Extract shift (identical to production logic: (u >>> 16) % 64)
-        shifts.push((u >>> 16) % 64);
+        // Extracted shift value
+        shifts.push((i >>> 16) % 64);
     }
     
     return shifts;
 }
 
-/**
- * Official encryption logic updated based on latest serverAsset.js
- */
-export function encryptCaptchaToken(token, key = CAPTCHA_SECRET, skip = 9, encryptLen = 19) {
+// encryptCaptchaToken - Official encryption function (j0 in serverAsset.js)
+export function encryptCaptchaToken(token, key = CAPTCHA_SECRET, skip = 10, encryptLen = 25) {
     if (!token) return token;
 
     const prefixLen = Math.max(0, Math.min(skip, token.length));
@@ -45,17 +37,15 @@ export function encryptCaptchaToken(token, key = CAPTCHA_SECRET, skip = 9, encry
 
     if (actualEncryptLen === 0) return token;
 
-    const prefix = token.slice(0, prefixLen);
-    const toEncrypt = token.slice(prefixLen, prefixLen + actualEncryptLen);
-    const suffix = token.slice(prefixLen + actualEncryptLen);
+    const prefix = token.slice(0, prefixLen);                               // First characters unchanged
+    const toEncrypt = token.slice(prefixLen, prefixLen + actualEncryptLen); // Characters to encrypt
+    const suffix = token.slice(prefixLen + actualEncryptLen);               // Rest unchanged
 
-    // Using the verified LCG shift generator
     const shifts = generateShifts(key, toEncrypt.length);
 
     const encrypted = toEncrypt.split("").map((ch, idx) => {
         const charIdx = CAPTCHA_CHARSET.indexOf(ch);
-        if (charIdx === -1) return ch;
-        // Application of shift with modulo 64
+        if (charIdx === -1) return ch;  // Non-alphanumeric unchanged
         return CAPTCHA_CHARSET[(charIdx + shifts[idx]) % 64];
     }).join("");
 
